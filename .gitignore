@@ -47,3 +47,8 @@ local.properties
 # Temporary and logs
 *.log
 *.tmp
+
+# Local workspace and documentation overrides
+docs/AGENT_RULES.md
+AGENT_RULES.md
+
