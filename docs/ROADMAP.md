@@ -23,13 +23,13 @@ Nearside is an open-source, local-first cross-platform file and content sharing 
 - [x] Numeric 8-digit short-code pairing with mutual P-256 ECDH key agreement and 5-attempt rate-limiting lockout.
 - [x] Persistent device trust store with atomic disk persistence, canonical ns1_<hex> SPKI hashing, and peer blocking.
 
-### Milestone 3: Transfer Engine and Protocol Integration (Next)
-- [ ] High-throughput TCP transfer engine with TLS/Noise session encryption.
-- [ ] Bounded 64 KiB streaming with backpressure and resume support.
-- [ ] Direct Sharesheet to Receiver pipe (zero-click handoff to trusted peers).
-- [ ] macOS Finder Drag-and-Drop and Android Sharesheet end-to-end transfers.
+### Milestone 3: Transfer Engine and Protocol Integration (Completed)
+- [x] High-throughput TCP transfer engine with encrypted sessions and JSON manifest/ack exchange.
+- [x] Bounded 64 KiB chunk streaming with flow control backpressure, resume support, and SHA-256 chunk validation.
+- [x] Direct Sharesheet to Receiver pipe (zero-click handoff to trusted peers).
+- [x] macOS Finder Drag-and-Drop and Android Sharesheet end-to-end transfers.
 
-### Milestone 4: Polish, Robustness, and Production Readiness
+### Milestone 4: Polish, Robustness, and Production Readiness (Next)
 - [ ] Network interruption recovery and auto-reconnect.
 - [ ] Power management optimization for background Android receivers.
 - [ ] Final security audit, packaging, and release automation.

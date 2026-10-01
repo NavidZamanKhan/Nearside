@@ -112,8 +112,26 @@ class MainActivity : ComponentActivity() {
                     onPairWithCode = { viewModel.pairWithCode(it) },
                     onPairWithQrUri = { viewModel.pairWithQrUri(it) },
                     onSendFiles = { device, uris ->
-                        val filenames = uris.map { it.lastPathSegment ?: "file" }
-                        viewModel.simulateTransfer(device, filenames, 25_000_000L)
+                        val staged = uris.mapNotNull { uri ->
+                            try {
+                                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file_${System.currentTimeMillis()}"
+                                val temp = java.io.File(cacheDir, name)
+                                contentResolver.openInputStream(uri)?.use { input ->
+                                    java.io.FileOutputStream(temp).use { output ->
+                                        input.copyTo(output)
+                                    }
+                                }
+                                temp
+                            } catch (e: Exception) {
+                                null
+                            }
+                        }
+                        if (staged.isNotEmpty()) {
+                            viewModel.sendFiles(staged, device)
+                        } else {
+                            val filenames = uris.map { it.lastPathSegment ?: "file" }
+                            viewModel.simulateTransfer(device, filenames, 25_000_000L)
+                        }
                     },
                     onClearHistory = { viewModel.clearHistory() }
                 )
