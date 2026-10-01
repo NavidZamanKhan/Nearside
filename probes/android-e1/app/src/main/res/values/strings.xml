@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Nearside E1 Probe</string>
+    <string name="service_name">Nearside Receiver</string>
+    <string name="channel_name">Nearside Receiver Status</string>
+    <string name="channel_desc">Shows active receiving state and controls for Nearside</string>
+    <string name="status_ready">Ready to receive</string>
+    <string name="status_paused">Paused</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+</resources>
