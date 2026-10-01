@@ -4,7 +4,7 @@ import AppKit
 @MainActor
 public struct PreferencesView: View {
     @ObservedObject var appState: AppState
-    @State private var selectedTab: Int = 1
+    @State private var selectedTab: Int = 0
     @State private var showingPairSheet: Bool = false
     @State private var shortCodeInput: String = ""
     @State private var pairMode: Int = 0 // 0 = QR, 1 = Short Code
@@ -14,79 +14,30 @@ public struct PreferencesView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 12) {
-            // Pure liquid glass tab picker (zero white shadow)
-            HStack {
-                Spacer()
-                glassPicker
-                Spacer()
-            }
-            .padding(.top, 4)
-
-            Group {
-                switch selectedTab {
-                case 0:
-                    generalTab
-                case 1:
-                    devicesTab
-                case 2:
-                    networkTab
-                default:
-                    devicesTab
+        TabView(selection: $selectedTab) {
+            generalTab
+                .tabItem {
+                    Label("General", systemImage: "gearshape")
                 }
-            }
+                .tag(0)
+
+            devicesTab
+                .tabItem {
+                    Label("Paired Devices", systemImage: "laptopcomputer.and.iphone")
+                }
+                .tag(1)
+
+            networkTab
+                .tabItem {
+                    Label("Network", systemImage: "network")
+                }
+                .tag(2)
         }
         .padding(20)
         .frame(width: 520, height: 420)
         .sheet(isPresented: $showingPairSheet) {
             pairingSheet
         }
-    }
-
-    // MARK: - Liquid Glass Segmented Picker
-    private var glassPicker: some View {
-        HStack(spacing: 0) {
-            segmentButton("General", tag: 0)
-            segmentButton("Paired Devices", tag: 1)
-            segmentButton("Network", tag: 2)
-        }
-        .padding(2)
-        .background(
-            Capsule()
-                .fill(Color.white.opacity(0.08))
-                .overlay(
-                    Capsule()
-                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-                )
-        )
-    }
-
-    private func segmentButton(_ title: String, tag: Int) -> some View {
-        let isSelected = selectedTab == tag
-        return Button(action: {
-            selectedTab = tag
-        }) {
-            Text(title)
-                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                .foregroundColor(isSelected ? .white : Color.white.opacity(0.6))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 4)
-                .background(
-                    Group {
-                        if isSelected {
-                            Capsule()
-                                .fill(Color.white.opacity(0.16))
-                                .overlay(
-                                    Capsule()
-                                        .stroke(Color.white.opacity(0.20), lineWidth: 0.5)
-                                )
-                        } else {
-                            Color.clear
-                        }
-                    }
-                )
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - General Tab
@@ -235,20 +186,11 @@ public struct PreferencesView: View {
                 }
             }
 
-            // Liquid glass pill switcher for pairing sheet as well
-            HStack(spacing: 0) {
-                pairingSegmentButton("QR Code", tag: 0)
-                pairingSegmentButton("Short Code", tag: 1)
+            Picker("Pairing Mode", selection: $pairMode) {
+                Text("QR Code").tag(0)
+                Text("Short Code").tag(1)
             }
-            .padding(2)
-            .background(
-                Capsule()
-                    .fill(Color.white.opacity(0.08))
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-                    )
-            )
+            .pickerStyle(.segmented)
 
             if pairMode == 0 {
                 VStack(spacing: 12) {
@@ -257,6 +199,7 @@ public struct PreferencesView: View {
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
 
+                    // Simulated QR Code Frame for visual dummy layout
                     ZStack {
                         RoundedRectangle(cornerRadius: 12)
                             .stroke(Color.primary.opacity(0.2), lineWidth: 1)
@@ -311,34 +254,6 @@ public struct PreferencesView: View {
         }
         .padding(24)
         .frame(width: 380, height: 340)
-    }
-
-    private func pairingSegmentButton(_ title: String, tag: Int) -> some View {
-        let isSelected = pairMode == tag
-        return Button(action: {
-            pairMode = tag
-        }) {
-            Text(title)
-                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                .foregroundColor(isSelected ? .white : Color.white.opacity(0.6))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-                .background(
-                    Group {
-                        if isSelected {
-                            Capsule()
-                                .fill(Color.white.opacity(0.16))
-                                .overlay(
-                                    Capsule()
-                                        .stroke(Color.white.opacity(0.20), lineWidth: 0.5)
-                                )
-                        } else {
-                            Color.clear
-                        }
-                    }
-                )
-        }
-        .buttonStyle(.plain)
     }
 
     private func selectDownloadsFolder() {
