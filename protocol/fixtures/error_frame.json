@@ -1,0 +1,5 @@
+{
+  "code": 403,
+  "reason": "DEVICE_NOT_PAIRED",
+  "detail": "Sender fingerprint ns1_unknown not found in pinned trust store."
+}
