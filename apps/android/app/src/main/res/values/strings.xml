@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Nearside</string>
+    <string name="receiving_channel_name">Nearside Receiving Service</string>
+    <string name="receiving_channel_desc">Shows background receiving status and controls</string>
+    <string name="status_ready">Nearside is active and receptive</string>
+    <string name="status_paused">Receiving is paused</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+</resources>

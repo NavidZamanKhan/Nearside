@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "service_instance": "Nearside-MacBookPro-7A3F._nearside._tcp.local.",
+  "txt_record": {
+    "v": "1",
+    "id": "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
+    "name": "Navid's MacBook Pro",
+    "os": "macos",
+    "pair": "1",
+    "recv": "1"
+  },
+  "addresses": [
+    "192.168.0.104"
+  ],
+  "port": 41433
+}

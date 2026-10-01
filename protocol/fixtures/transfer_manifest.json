@@ -1,0 +1,15 @@
+{
+  "transfer_id": "tx_88a4b2c1d90e",
+  "sender_id": "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
+  "total_bytes": 52428800,
+  "item_count": 1,
+  "items": [
+    {
+      "index": 0,
+      "name": "archive_backup.tar.gz",
+      "mime_type": "application/gzip",
+      "size": 52428800,
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a"
+    }
+  ]
+}

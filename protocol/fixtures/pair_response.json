@@ -1,0 +1,10 @@
+{
+  "type": "pair_response",
+  "version": 1,
+  "server_id": "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
+  "server_name": "iQOO Neo9",
+  "server_os": "android",
+  "ephemeral_public_key": "04deadbeef00112233445566778899aabbccddeeff112233445566778899aabbccddeeff00112233445566778899aabbccddeeff112233445566778899aabbccdd",
+  "auth_tag": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "timestamp": 1727820001
+}
