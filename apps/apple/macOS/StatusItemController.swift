@@ -61,13 +61,16 @@ public final class StatusItemController: NSObject {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.center()
-        window.title = "Nearside Preferences"
+        window.title = "Nearside"
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = .clear
         window.contentViewController = NSHostingController(
             rootView: PreferencesView(appState: AppState.shared)
         )
