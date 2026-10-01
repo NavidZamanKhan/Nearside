@@ -22,11 +22,12 @@ public struct MenuBarShelfView: View {
             // Header
             headerSection
                 .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 12)
 
             Divider()
 
-            // Active Transfer (if running)
+            // Active Transfer Live Progress (if running)
             if let active = appState.activeTransfer {
                 activeTransferSection(record: active)
                     .padding(.horizontal, 16)
@@ -40,20 +41,19 @@ public struct MenuBarShelfView: View {
                     nearbyDevicesSection
                     recentTransfersSection
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 12)
                 .padding(.vertical, 12)
             }
-            .frame(maxHeight: 380)
+            .frame(maxHeight: 360)
 
             Divider()
 
-            // Bottom toolbar
+            // Footer Toolbar
             footerToolbar
                 .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color(NSColor.windowBackgroundColor).opacity(0.6))
+                .padding(.vertical, 9)
         }
-        .frame(width: 350)
+        .frame(width: 340)
     }
 
     // MARK: - Header
@@ -62,13 +62,13 @@ public struct MenuBarShelfView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text("Nearside")
-                        .font(.system(size: 15, weight: .bold))
+                        .font(.system(size: 14, weight: .bold))
                     Circle()
                         .fill(appState.isReceivingActive ? Color.green : Color.orange)
-                        .frame(width: 8, height: 8)
+                        .frame(width: 7, height: 7)
                 }
                 Text(appState.localDeviceName)
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .foregroundColor(.secondary)
             }
 
@@ -83,13 +83,10 @@ public struct MenuBarShelfView: View {
                     Text(appState.isReceivingActive ? "Receiving" : "Paused")
                         .font(.system(size: 11, weight: .medium))
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(appState.isReceivingActive ? Color.green.opacity(0.15) : Color.orange.opacity(0.15))
-                .foregroundColor(appState.isReceivingActive ? .green : .orange)
-                .cornerRadius(12)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(appState.isReceivingActive ? .green : .orange)
         }
     }
 
@@ -98,98 +95,65 @@ public struct MenuBarShelfView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: "arrow.up.circle.fill")
-                    .foregroundColor(.blue)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundColor(.accentColor)
+                    .font(.system(size: 14))
+
                 Text("Sending to \(record.deviceName)...")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12, weight: .medium))
                 Spacer()
                 Text("\(Int(record.progress * 100))%")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.secondary)
             }
             Text(record.filename)
-                .font(.system(size: 11))
+                .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
             ProgressView(value: record.progress)
                 .progressViewStyle(.linear)
+                .controlSize(.small)
         }
     }
 
-    // MARK: - Nearby Devices
+    // MARK: - Nearby Devices Section
     private var nearbyDevicesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("AVAILABLE PEERS")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
                 Spacer()
                 Text("\(appState.discoveredDevices.count) nearby")
-                    .font(.system(size: 10))
+                    .font(.caption2)
                     .foregroundColor(.secondary)
             }
+            .padding(.horizontal, 4)
 
             if appState.discoveredDevices.isEmpty {
                 HStack {
                     Spacer()
                     Text("No nearby devices advertising")
-                        .font(.system(size: 11))
+                        .font(.caption)
                         .foregroundColor(.secondary)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 10)
                     Spacer()
                 }
             } else {
-                ForEach(appState.discoveredDevices) { device in
-                    deviceRow(device: device)
+                VStack(spacing: 2) {
+                    ForEach(appState.discoveredDevices) { device in
+                        DeviceRowView(device: device) {
+                            promptSendFile(to: device)
+                        }
+                    }
                 }
             }
         }
     }
 
-    private func deviceRow(device: NearsideDevice) -> some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.15))
-                    .frame(width: 32, height: 32)
-                Image(systemName: device.platform.systemSymbolName)
-                    .font(.system(size: 14))
-                    .foregroundColor(.accentColor)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(device.name)
-                    .font(.system(size: 12, weight: .medium))
-                HStack(spacing: 4) {
-                    Text(device.platform.displayName)
-                    Text("•")
-                    Text(device.shortFingerprint)
-                }
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            Button(action: {
-                promptSendFile(to: device)
-            }) {
-                Text("Send File...")
-                    .font(.system(size: 11, weight: .medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.08))
-                    .cornerRadius(6)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(8)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-        .cornerRadius(8)
-    }
-
-    // MARK: - Recent Transfers
+    // MARK: - Recent Transfers Section
     private var recentTransfersSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("RECENT ACTIVITY")
                     .font(.system(size: 10, weight: .bold))
@@ -198,90 +162,54 @@ public struct MenuBarShelfView: View {
                 if !appState.transferHistory.isEmpty {
                     Button(action: { appState.clearHistory() }) {
                         Text("Clear")
-                            .font(.system(size: 10))
+                            .font(.caption2)
                             .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                 }
             }
+            .padding(.horizontal, 4)
 
             if appState.transferHistory.isEmpty {
                 HStack {
                     Spacer()
                     Text("No recent transfers")
-                        .font(.system(size: 11))
+                        .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.vertical, 8)
                     Spacer()
                 }
             } else {
-                ForEach(appState.transferHistory) { record in
-                    transferRow(record: record)
+                VStack(spacing: 2) {
+                    ForEach(appState.transferHistory) { record in
+                        TransferRowView(
+                            record: record,
+                            downloadsURL: appState.downloadsFolderURL
+                        )
+                    }
                 }
             }
         }
-    }
-
-    private func transferRow(record: TransferRecord) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: record.direction == .incoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                .foregroundColor(record.direction == .incoming ? .green : .blue)
-                .font(.system(size: 14))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.filename)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(record.deviceName)
-                    Text("•")
-                    Text(record.formattedSize)
-                }
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            if record.direction == .incoming {
-                Button(action: {
-                    NSWorkspace.shared.activateFileViewerSelecting([
-                        appState.downloadsFolderURL.appendingPathComponent(record.filename)
-                    ])
-                }) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Show in Finder")
-            }
-        }
-        .padding(.vertical, 4)
     }
 
     // MARK: - Footer Toolbar
     private var footerToolbar: some View {
         HStack {
             Button(action: onOpenSettings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 12))
-                Text("Settings")
+                Label("Settings", systemImage: "gearshape")
                     .font(.system(size: 11))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
 
             Spacer()
 
             Button(action: {
                 NSWorkspace.shared.open(appState.downloadsFolderURL)
             }) {
-                Image(systemName: "folder")
-                    .font(.system(size: 12))
-                Text("Downloads")
+                Label("Downloads", systemImage: "folder")
                     .font(.system(size: 11))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
 
             Spacer()
 
@@ -290,7 +218,7 @@ public struct MenuBarShelfView: View {
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
         }
     }
 
@@ -310,6 +238,108 @@ public struct MenuBarShelfView: View {
                 return acc + Int64(size)
             }
             appState.simulateOutgoingTransfer(to: device, filenames: filenames, totalBytes: totalBytes)
+        }
+    }
+}
+
+// MARK: - Native AppKit-Style Device Row
+private struct DeviceRowView: View {
+    let device: NearsideDevice
+    let onSend: () -> Void
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.12))
+                    .frame(width: 32, height: 32)
+                Image(systemName: device.platform.systemSymbolName)
+                    .font(.system(size: 14))
+                    .foregroundColor(.accentColor)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(device.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.primary)
+                HStack(spacing: 4) {
+                    Text(device.platform.displayName)
+                    Text("•")
+                    Text(device.shortFingerprint)
+                }
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button("Send File...", action: onSend)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isHovered ? Color(nsColor: .quaternaryLabelColor) : Color.clear)
+        )
+        .onHover { inside in
+            isHovered = inside
+        }
+    }
+}
+
+// MARK: - Native AppKit-Style Transfer Row
+private struct TransferRowView: View {
+    let record: TransferRecord
+    let downloadsURL: URL
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: record.direction == .incoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundColor(record.direction == .incoming ? .green : .accentColor)
+                .font(.system(size: 15))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.filename)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(record.deviceName)
+                    Text("•")
+                    Text(record.formattedSize)
+                }
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if record.direction == .incoming {
+                Button(action: {
+                    NSWorkspace.shared.activateFileViewerSelecting([
+                        downloadsURL.appendingPathComponent(record.filename)
+                    ])
+                }) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Show in Finder")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovered ? Color(nsColor: .quaternaryLabelColor) : Color.clear)
+        )
+        .onHover { inside in
+            isHovered = inside
         }
     }
 }
