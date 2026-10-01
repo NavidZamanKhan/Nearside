@@ -37,6 +37,8 @@ xcrun swiftc -O -emit-executable \
     apps/apple/Shared/Crypto/QRPairingProtocol.swift \
     apps/apple/Shared/Crypto/ShortCodePakeProtocol.swift \
     apps/apple/Shared/Discovery/DiscoveryService.swift \
+    apps/apple/Shared/Transfer/TransferProtocol.swift \
+    apps/apple/Shared/Transfer/TransferEngine.swift \
     apps/apple/Shared/AppState.swift \
     apps/apple/macOS/Views/MenuBarShelfView.swift \
     apps/apple/macOS/Views/PreferencesView.swift \

@@ -238,6 +238,57 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun sendFiles(files: List<java.io.File>, device: NearsideDevice) {
+        val totalBytes = files.sumOf { it.length() }
+        val record = TransferRecord(
+            deviceName = device.name,
+            devicePlatform = device.platform,
+            direction = TransferDirection.OUTGOING,
+            filename = files.firstOrNull()?.name ?: "Document",
+            fileCount = files.size,
+            totalSizeBytes = totalBytes,
+            progress = 0.05f,
+            status = TransferStatus.TRANSFERRING
+        )
+        _uiState.update { it.copy(activeTransfer = record) }
+
+        val host = device.ipAddress
+        if (host != null && host.isNotEmpty()) {
+            viewModelScope.launch {
+                val res = com.nearside.app.transfer.TransferEngine.sendFiles(
+                    files = files,
+                    host = host,
+                    port = device.port ?: 41433,
+                    senderId = deviceIdentity.publicIdentity,
+                    onProgress = { frac, _, _ ->
+                        _uiState.update { current ->
+                            current.activeTransfer?.let {
+                                current.copy(activeTransfer = it.copy(progress = frac))
+                            } ?: current
+                        }
+                    }
+                )
+
+                _uiState.update { current ->
+                    val finished = current.activeTransfer?.copy(
+                        progress = 1.0f,
+                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED
+                    )
+                    val updatedHistory = if (finished != null) {
+                        listOf(finished) + current.recentTransfers
+                    } else current.recentTransfers
+
+                    current.copy(
+                        activeTransfer = null,
+                        recentTransfers = updatedHistory
+                    )
+                }
+            }
+        } else {
+            simulateTransfer(device, files.map { it.name }, totalBytes)
+        }
+    }
+
     fun simulateTransfer(device: NearsideDevice, filenames: List<String>, totalBytes: Long) {
         val record = TransferRecord(
             deviceName = device.name,

@@ -12,7 +12,16 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.nearside.app.R
+import com.nearside.app.crypto.PinnedTrustStore
+import com.nearside.app.transfer.TransferEngine
 import com.nearside.app.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.net.ServerSocket
 
 class NearsideReceiverService : Service() {
 
@@ -71,6 +80,8 @@ class NearsideReceiverService : Service() {
                 updateNotification(isPaused = false)
             }
             ACTION_STOP -> {
+                isReceiving = false
+                stopTcpListener()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -87,10 +98,64 @@ class NearsideReceiverService : Service() {
                 } else {
                     startForeground(NOTIFICATION_ID, notification)
                 }
+                startTcpListener()
             }
         }
 
         return START_STICKY
+    }
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var serverSocket: ServerSocket? = null
+
+    private fun startTcpListener() {
+        stopTcpListener()
+        try {
+            val socket = ServerSocket(41433)
+            serverSocket = socket
+            serviceScope.launch {
+                val trustStore = PinnedTrustStore(this@NearsideReceiverService)
+                val destDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    ?: filesDir
+
+                while (isActive && !socket.isClosed) {
+                    try {
+                        val client = socket.accept()
+                        if (!isReceiving) {
+                            client.close()
+                            continue
+                        }
+                        serviceScope.launch {
+                            TransferEngine.handleInboundConnection(
+                                socket = client,
+                                trustStore = trustStore,
+                                destinationDir = destDir,
+                                onProgress = { progress, record ->
+                                    // Update notification or emit event
+                                }
+                            )
+                        }
+                    } catch (e: Exception) {
+                        break
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Port already in use or test mode
+        }
+    }
+
+    private fun stopTcpListener() {
+        try {
+            serverSocket?.close()
+        } catch (ignored: Exception) {}
+        serverSocket = null
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopTcpListener()
+        serviceScope.cancel()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

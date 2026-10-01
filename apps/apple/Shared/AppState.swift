@@ -185,6 +185,60 @@ public final class AppState: ObservableObject {
         transferHistory.removeAll()
     }
 
+    public func sendFiles(urls: [URL], to device: NearsideDevice) {
+        guard !urls.isEmpty else { return }
+
+        let firstFilename = urls.first?.lastPathComponent ?? "Files"
+        let totalBytes = urls.reduce(Int64(0)) { acc, url in
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            return acc + size
+        }
+
+        let record = TransferRecord(
+            deviceName: device.name,
+            devicePlatform: device.platform,
+            direction: .outgoing,
+            filename: firstFilename,
+            fileCount: urls.count,
+            totalSizeBytes: totalBytes,
+            progress: 0.05,
+            status: .transferring,
+            timestamp: Date()
+        )
+        self.activeTransfer = record
+
+        if let ip = device.ipAddress, !ip.isEmpty {
+            TransferEngine.shared.sendFiles(
+                files: urls,
+                to: device,
+                senderId: localFingerprint,
+                onProgress: { [weak self] fraction, transferred, total in
+                    Task { @MainActor in
+                        self?.activeTransfer?.progress = fraction
+                    }
+                },
+                completion: { [weak self] result in
+                    Task { @MainActor in
+                        switch result {
+                        case .success(let finished):
+                            self?.transferHistory.insert(finished, at: 0)
+                            self?.activeTransfer = nil
+                        case .failure:
+                            if var failed = self?.activeTransfer {
+                                failed.status = .failed
+                                self?.transferHistory.insert(failed, at: 0)
+                            }
+                            self?.activeTransfer = nil
+                        }
+                    }
+                }
+            )
+        } else {
+            // Fallback to simulation if IP is unresolvable
+            simulateOutgoingTransfer(to: device, filenames: urls.map { $0.lastPathComponent }, totalBytes: totalBytes)
+        }
+    }
+
     public func simulateOutgoingTransfer(to device: NearsideDevice, filenames: [String], totalBytes: Int64) {
         let firstFilename = filenames.first ?? "Untitled File"
         let newRecord = TransferRecord(

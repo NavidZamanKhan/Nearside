@@ -142,9 +142,11 @@ public struct MenuBarShelfView: View {
             } else {
                 VStack(spacing: 2) {
                     ForEach(appState.discoveredDevices) { device in
-                        DeviceRowView(device: device) {
-                            promptSendFile(to: device)
-                        }
+                        DeviceRowView(
+                            device: device,
+                            onSend: { promptSendFile(to: device) },
+                            onDropFiles: { urls in appState.sendFiles(urls: urls, to: device) }
+                        )
                     }
                 }
             }
@@ -231,13 +233,7 @@ public struct MenuBarShelfView: View {
         panel.title = "Send to \(device.name)"
 
         if panel.runModal() == .OK {
-            let urls = panel.urls
-            let filenames = urls.map { $0.lastPathComponent }
-            let totalBytes = urls.reduce(Int64(0)) { acc, url in
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 1024
-                return acc + Int64(size)
-            }
-            appState.simulateOutgoingTransfer(to: device, filenames: filenames, totalBytes: totalBytes)
+            appState.sendFiles(urls: panel.urls, to: device)
         }
     }
 }
@@ -246,15 +242,17 @@ public struct MenuBarShelfView: View {
 private struct DeviceRowView: View {
     let device: NearsideDevice
     let onSend: () -> Void
+    let onDropFiles: ([URL]) -> Void
     @State private var isHovered: Bool = false
+    @State private var isDropTarget: Bool = false
 
     var body: some View {
         HStack(spacing: 10) {
             ZStack {
                 Circle()
-                    .fill(Color.accentColor.opacity(0.12))
+                    .fill(isDropTarget ? Color.accentColor.opacity(0.3) : Color.accentColor.opacity(0.12))
                     .frame(width: 32, height: 32)
-                Image(systemName: device.platform.systemSymbolName)
+                Image(systemName: isDropTarget ? "arrow.down.doc.fill" : device.platform.systemSymbolName)
                     .font(.system(size: 14))
                     .foregroundColor(.accentColor)
             }
@@ -282,10 +280,34 @@ private struct DeviceRowView: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isHovered ? Color(nsColor: .quaternaryLabelColor) : Color.clear)
+                .fill(isDropTarget ? Color.accentColor.opacity(0.15) : (isHovered ? Color(nsColor: .quaternaryLabelColor) : Color.clear))
         )
         .onHover { inside in
             isHovered = inside
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
+            let group = DispatchGroup()
+            var collectedURLs: [URL] = []
+            let lock = NSLock()
+
+            for provider in providers {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let fileURL = url {
+                        lock.lock()
+                        collectedURLs.append(fileURL)
+                        lock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+
+            group.notify(queue: .main) {
+                if !collectedURLs.isEmpty {
+                    onDropFiles(collectedURLs)
+                }
+            }
+            return true
         }
     }
 }
