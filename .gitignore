@@ -51,4 +51,5 @@ local.properties
 # Local workspace and documentation overrides
 docs/AGENT_RULES.md
 AGENT_RULES.md
+test_e2
 
