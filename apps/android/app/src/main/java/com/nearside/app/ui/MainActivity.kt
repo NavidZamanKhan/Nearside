@@ -110,6 +110,7 @@ class MainActivity : ComponentActivity() {
                     onToggleReceiving = { viewModel.toggleReceiving(this) },
                     onUnpair = { viewModel.unpairDevice(it) },
                     onPairWithCode = { viewModel.pairWithCode(it) },
+                    onPairWithQrUri = { viewModel.pairWithQrUri(it) },
                     onSendFiles = { device, uris ->
                         val filenames = uris.map { it.lastPathSegment ?: "file" }
                         viewModel.simulateTransfer(device, filenames, 25_000_000L)
@@ -128,6 +129,7 @@ fun MainScreen(
     onToggleReceiving: () -> Unit,
     onUnpair: (String) -> Unit,
     onPairWithCode: (String) -> Unit,
+    onPairWithQrUri: (String) -> Boolean,
     onSendFiles: (NearsideDevice, List<Uri>) -> Unit,
     onClearHistory: () -> Unit
 ) {
@@ -286,12 +288,17 @@ fun MainScreen(
     if (showQrDialog) {
         QrPairingDialog(
             fingerprint = uiState.localFingerprint,
-            onDismiss = { showQrDialog = false }
+            onDismiss = { showQrDialog = false },
+            onPairWithUri = { uri ->
+                val ok = onPairWithQrUri(uri)
+                if (ok) showQrDialog = false
+            }
         )
     }
 
     if (showCodeDialog) {
         ShortCodePairingDialog(
+            localCode = uiState.activePairingCode,
             onDismiss = { showCodeDialog = false },
             onConfirmCode = { code ->
                 onPairWithCode(code)
@@ -526,55 +533,99 @@ fun TransferRow(record: TransferRecord) {
 }
 
 @Composable
-fun QrPairingDialog(fingerprint: String, onDismiss: () -> Unit) {
+fun QrPairingDialog(
+    fingerprint: String,
+    onDismiss: () -> Unit,
+    onPairWithUri: (String) -> Unit
+) {
+    var uriInput by remember { mutableStateOf("") }
+    var isEnteringUri by remember { mutableStateOf(false) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = "Pair with QR Code") },
+        title = { Text(text = if (isEnteringUri) "Connect via URI" else "Pair with QR Code") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "Scan this code with the Nearside app on your Mac or other device:",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Box(
-                    modifier = Modifier
-                        .size(160.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.White),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.QrCode,
-                            contentDescription = null,
-                            tint = Color.Black,
-                            modifier = Modifier.size(100.dp)
-                        )
-                        Text(
-                            text = "nearside://pair",
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = Color.DarkGray
-                        )
+                if (isEnteringUri) {
+                    Text(
+                        text = "Paste or enter the nearside://pair URI from your other device:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = uriInput,
+                        onValueChange = { uriInput = it },
+                        label = { Text(text = "nearside://pair?...") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = false,
+                        maxLines = 3
+                    )
+                } else {
+                    Text(
+                        text = "Scan this code with the Nearside app on your Mac or other device:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(160.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.QrCode,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(100.dp)
+                            )
+                            Text(
+                                text = "nearside://pair",
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.DarkGray
+                            )
+                        }
                     }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Fingerprint: ${fingerprint.take(16)}...",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Fingerprint: ${fingerprint.take(16)}...",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                TextButton(onClick = { isEnteringUri = !isEnteringUri }) {
+                    Text(text = if (isEnteringUri) "Show My QR Code" else "Enter URI Manually")
+                }
             }
         },
         confirmButton = {
-            Button(onClick = onDismiss) {
-                Text(text = "Done")
+            if (isEnteringUri) {
+                Button(
+                    onClick = { onPairWithUri(uriInput) },
+                    enabled = uriInput.startsWith("nearside://pair")
+                ) {
+                    Text(text = "Pair")
+                }
+            } else {
+                Button(onClick = onDismiss) {
+                    Text(text = "Done")
+                }
+            }
+        },
+        dismissButton = {
+            if (isEnteringUri) {
+                TextButton(onClick = onDismiss) {
+                    Text(text = "Cancel")
+                }
             }
         }
     )
@@ -582,6 +633,7 @@ fun QrPairingDialog(fingerprint: String, onDismiss: () -> Unit) {
 
 @Composable
 fun ShortCodePairingDialog(
+    localCode: String,
     onDismiss: () -> Unit,
     onConfirmCode: (String) -> Unit
 ) {
@@ -593,11 +645,36 @@ fun ShortCodePairingDialog(
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "Enter the 8-digit verification code displayed on your other device:",
+                    text = "Your Pairing Code:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Box(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = localCode,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Or enter the 8-digit code from peer device:",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = codeInput,
                     onValueChange = { if (it.length <= 8) codeInput = it },

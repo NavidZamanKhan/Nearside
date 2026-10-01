@@ -1,8 +1,16 @@
 package com.nearside.app.state
 
+import android.app.Application
 import android.content.Context
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.nearside.app.crypto.DeviceIdentity
+import com.nearside.app.crypto.PakeSessionConfig
+import com.nearside.app.crypto.PinnedTrustStore
+import com.nearside.app.crypto.QRPairingPayload
+import com.nearside.app.crypto.QRPairingSession
+import com.nearside.app.crypto.ShortCodePakeParticipant
+import com.nearside.app.discovery.NsdDiscoveryService
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.DeviceReachability
 import com.nearside.app.model.NearsideDevice
@@ -26,51 +34,79 @@ data class NearsideUiState(
     val pairedDevices: List<NearsideDevice> = emptyList(),
     val discoveredDevices: List<NearsideDevice> = emptyList(),
     val recentTransfers: List<TransferRecord> = emptyList(),
-    val activeTransfer: TransferRecord? = null
+    val activeTransfer: TransferRecord? = null,
+    val activePairingCode: String = "4819 2034"
 )
 
-class AppViewModel : ViewModel() {
+class AppViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(NearsideUiState())
+    private val context: Context = application.applicationContext
+    val deviceIdentity: DeviceIdentity = DeviceIdentity.loadOrCreateDefault(context)
+    val trustStore: PinnedTrustStore = PinnedTrustStore(context)
+    val nsdDiscovery: NsdDiscoveryService = NsdDiscoveryService(context)
+
+    private val _uiState = MutableStateFlow(
+        NearsideUiState(
+            localDeviceName = "iQOO Neo9",
+            localFingerprint = deviceIdentity.publicIdentity,
+            activePairingCode = generateRandomShortCode()
+        )
+    )
     val uiState: StateFlow<NearsideUiState> = _uiState.asStateFlow()
 
     init {
-        loadInitialState()
+        loadEnrolledAndSeedData()
+        startDiscoveryEngine()
     }
 
-    private fun loadInitialState() {
-        val initialPaired = listOf(
-            NearsideDevice(
-                id = "dev_macbook_pro",
-                name = "MacBook Pro",
-                platform = DevicePlatform.MACOS,
-                fingerprint = "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
-                ipAddress = "192.168.0.104",
-                port = 41433,
-                reachability = DeviceReachability.ONLINE
-            ),
-            NearsideDevice(
-                id = "dev_ipad_air",
-                name = "iPad Air",
-                platform = DevicePlatform.IOS,
-                fingerprint = "ns1_c5e891b00142fa9166da23491f08cb34",
-                ipAddress = "192.168.0.108",
-                port = 41433,
-                reachability = DeviceReachability.UNREACHABLE
-            )
-        )
+    private fun generateRandomShortCode(): String {
+        val part1 = (1000..9999).random()
+        val part2 = (1000..9999).random()
+        return "$part1 $part2"
+    }
 
-        val initialDiscovered = listOf(
-            NearsideDevice(
-                id = "dev_macbook_pro",
-                name = "MacBook Pro",
-                platform = DevicePlatform.MACOS,
-                fingerprint = "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
-                ipAddress = "192.168.0.104",
-                port = 41433,
-                reachability = DeviceReachability.ONLINE
+    private fun loadEnrolledAndSeedData() {
+        val enrolled = trustStore.allEnrolledPeers()
+        val pairedList = if (enrolled.isNotEmpty()) {
+            enrolled.map { record ->
+                val platform = when (record.platformRaw.lowercase()) {
+                    "macos" -> DevicePlatform.MACOS
+                    "android" -> DevicePlatform.ANDROID
+                    "ios" -> DevicePlatform.IOS
+                    "windows" -> DevicePlatform.WINDOWS
+                    "linux" -> DevicePlatform.LINUX
+                    else -> DevicePlatform.ANDROID
+                }
+                NearsideDevice(
+                    id = record.identity,
+                    name = record.name,
+                    platform = platform,
+                    fingerprint = record.identity,
+                    reachability = DeviceReachability.ONLINE
+                )
+            }
+        } else {
+            listOf(
+                NearsideDevice(
+                    id = "dev_macbook_pro",
+                    name = "MacBook Pro",
+                    platform = DevicePlatform.MACOS,
+                    fingerprint = "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
+                    ipAddress = "192.168.0.104",
+                    port = 41433,
+                    reachability = DeviceReachability.ONLINE
+                ),
+                NearsideDevice(
+                    id = "dev_ipad_air",
+                    name = "iPad Air",
+                    platform = DevicePlatform.IOS,
+                    fingerprint = "ns1_c5e891b00142fa9166da23491f08cb34",
+                    ipAddress = "192.168.0.108",
+                    port = 41433,
+                    reachability = DeviceReachability.UNREACHABLE
+                )
             )
-        )
+        }
 
         val initialTransfers = listOf(
             TransferRecord(
@@ -101,10 +137,27 @@ class AppViewModel : ViewModel() {
 
         _uiState.update {
             it.copy(
-                pairedDevices = initialPaired,
-                discoveredDevices = initialDiscovered,
+                pairedDevices = pairedList,
                 recentTransfers = initialTransfers
             )
+        }
+    }
+
+    private fun startDiscoveryEngine() {
+        nsdDiscovery.startAdvertising(
+            identity = deviceIdentity.publicIdentity,
+            deviceName = _uiState.value.localDeviceName,
+            port = _uiState.value.localPort,
+            isReceiving = _uiState.value.isReceivingActive
+        )
+        nsdDiscovery.startDiscovery()
+
+        viewModelScope.launch {
+            nsdDiscovery.discoveredDevices.collect { discovered ->
+                if (discovered.isNotEmpty()) {
+                    _uiState.update { it.copy(discoveredDevices = discovered) }
+                }
+            }
         }
     }
 
@@ -113,23 +166,71 @@ class AppViewModel : ViewModel() {
         _uiState.update { it.copy(isReceivingActive = newState) }
         if (newState) {
             NearsideReceiverService.resume(context)
+            nsdDiscovery.startAdvertising(
+                identity = deviceIdentity.publicIdentity,
+                deviceName = _uiState.value.localDeviceName,
+                port = _uiState.value.localPort,
+                isReceiving = true
+            )
         } else {
             NearsideReceiverService.pause(context)
+            nsdDiscovery.startAdvertising(
+                identity = deviceIdentity.publicIdentity,
+                deviceName = _uiState.value.localDeviceName,
+                port = _uiState.value.localPort,
+                isReceiving = false
+            )
         }
     }
 
     fun unpairDevice(deviceId: String) {
+        trustStore.unpair(deviceId)
         _uiState.update { current ->
             current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == deviceId })
         }
     }
 
+    fun pairWithQrUri(uriString: String): Boolean {
+        val payload = QRPairingPayload.fromUri(uriString) ?: return false
+        val dummyKey = DeviceIdentity.generateEphemeral().publicKey
+        trustStore.enroll(
+            identity = payload.hostIdentity,
+            name = payload.hostName,
+            platform = "macos",
+            publicKey = dummyKey
+        )
+
+        val newDevice = NearsideDevice(
+            id = payload.hostIdentity,
+            name = payload.hostName,
+            platform = DevicePlatform.MACOS,
+            fingerprint = payload.hostIdentity,
+            reachability = DeviceReachability.ONLINE
+        )
+
+        _uiState.update { current ->
+            current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == payload.hostIdentity } + newDevice)
+        }
+        return true
+    }
+
     fun pairWithCode(code: String) {
-        if (code.length >= 6) {
+        val cleanCode = code.replace(" ", "")
+        if (cleanCode.length >= 6) {
+            val peerId = "ns1_sc_$cleanCode"
+            val dummyKey = DeviceIdentity.generateEphemeral().publicKey
+            trustStore.enroll(
+                identity = peerId,
+                name = "Paired Peer (${cleanCode.take(4)})",
+                platform = "macos",
+                publicKey = dummyKey
+            )
+
             val newDevice = NearsideDevice(
-                name = "Paired Peer (${code.take(4)})",
+                id = peerId,
+                name = "Paired Peer (${cleanCode.take(4)})",
                 platform = DevicePlatform.MACOS,
-                fingerprint = "ns1_peer_$code"
+                fingerprint = peerId
             )
             _uiState.update { current ->
                 current.copy(pairedDevices = current.pairedDevices + newDevice)
@@ -179,5 +280,10 @@ class AppViewModel : ViewModel() {
 
     fun clearHistory() {
         _uiState.update { it.copy(recentTransfers = emptyList()) }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        nsdDiscovery.release()
     }
 }

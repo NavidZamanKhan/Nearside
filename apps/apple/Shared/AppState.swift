@@ -1,10 +1,14 @@
 import Foundation
 import Combine
 import SwiftUI
+import CryptoKit
 
 @MainActor
 public final class AppState: ObservableObject {
     public static let shared = AppState()
+
+    public let deviceIdentity: DeviceIdentity
+    public let trustStore: PinnedTrustStore
 
     @Published public var localDeviceName: String
     @Published public var localFingerprint: String
@@ -17,41 +21,69 @@ public final class AppState: ObservableObject {
     @Published public var activeTransfer: TransferRecord?
 
     public init() {
+        let identity = DeviceIdentity.loadOrCreateDefault()
+        self.deviceIdentity = identity
+        self.trustStore = PinnedTrustStore()
+
         let hostName = Host.current().localizedName ?? "MacBook Pro"
         self.localDeviceName = hostName
-        self.localFingerprint = "ns1_7a3f8902bc114d6e9021aabbccddeeff"
+        self.localFingerprint = identity.publicIdentity
         self.downloadsFolderURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
 
-        loadInitialSeedData()
+        loadInitialTrustAndSeedData()
+        startDiscoveryEngine()
     }
 
-    private func loadInitialSeedData() {
-        // Paired devices initial body seed
-        self.pairedDevices = [
-            NearsideDevice(
-                id: "dev_iqoo_neo9",
-                name: "iQOO Neo9",
-                platform: .android,
-                fingerprint: "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
-                ipAddress: "192.168.0.101",
-                port: 41433,
-                reachability: .online,
-                lastSeen: Date()
-            ),
-            NearsideDevice(
-                id: "dev_ipad_pro",
-                name: "iPad Air",
-                platform: .iOS,
-                fingerprint: "ns1_c5e891b00142fa9166da23491f08cb34",
-                ipAddress: "192.168.0.108",
-                port: 41433,
-                reachability: .unreachable,
-                lastSeen: Date().addingTimeInterval(-86400 * 2)
-            )
-        ]
+    private func loadInitialTrustAndSeedData() {
+        let enrolled = trustStore.allEnrolledPeers()
+        if !enrolled.isEmpty {
+            self.pairedDevices = enrolled.map { record in
+                let platform: DevicePlatform
+                switch record.platformRaw.lowercased() {
+                case "macos": platform = .macOS
+                case "android": platform = .android
+                case "ios": platform = .iOS
+                case "windows": platform = .windows
+                case "linux": platform = .linux
+                default: platform = .android
+                }
+                return NearsideDevice(
+                    id: record.identity,
+                    name: record.name,
+                    platform: platform,
+                    fingerprint: record.identity,
+                    reachability: .online,
+                    lastSeen: record.enrolledAt
+                )
+            }
+        } else {
+            // Initial seed for immediate visibility before first live pairing
+            self.pairedDevices = [
+                NearsideDevice(
+                    id: "dev_iqoo_neo9",
+                    name: "iQOO Neo9",
+                    platform: .android,
+                    fingerprint: "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
+                    ipAddress: "192.168.0.101",
+                    port: 41433,
+                    reachability: .online,
+                    lastSeen: Date()
+                ),
+                NearsideDevice(
+                    id: "dev_ipad_pro",
+                    name: "iPad Air",
+                    platform: .iOS,
+                    fingerprint: "ns1_c5e891b00142fa9166da23491f08cb34",
+                    ipAddress: "192.168.0.108",
+                    port: 41433,
+                    reachability: .unreachable,
+                    lastSeen: Date().addingTimeInterval(-86400 * 2)
+                )
+            ]
+        }
 
-        // Discovered nearby peers
+        // Initial discovered peers fallback seed
         self.discoveredDevices = [
             NearsideDevice(
                 id: "dev_iqoo_neo9",
@@ -94,12 +126,55 @@ public final class AppState: ObservableObject {
         ]
     }
 
+    private func startDiscoveryEngine() {
+        let service = DiscoveryService.shared
+        service.onDiscoveredDevicesChanged = { [weak self] devices in
+            guard let self = self else { return }
+            if !devices.isEmpty {
+                self.discoveredDevices = devices
+            }
+        }
+        service.startAdvertising(
+            identity: deviceIdentity.publicIdentity,
+            deviceName: localDeviceName,
+            isReceiving: isReceivingActive
+        )
+        service.startBrowsing()
+    }
+
     public func toggleReceiving() {
         isReceivingActive.toggle()
+        DiscoveryService.shared.updateReceivingStatus(isReceivingActive)
+    }
+
+    public func pairDevice(identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey) {
+        trustStore.enroll(identity: identity, name: name, platform: platform, publicKey: publicKey)
+        let devicePlatform: DevicePlatform
+        switch platform.lowercased() {
+        case "macos": devicePlatform = .macOS
+        case "android": devicePlatform = .android
+        case "ios": devicePlatform = .iOS
+        case "windows": devicePlatform = .windows
+        case "linux": devicePlatform = .linux
+        default: devicePlatform = .android
+        }
+
+        let newDevice = NearsideDevice(
+            id: identity,
+            name: name,
+            platform: devicePlatform,
+            fingerprint: identity,
+            reachability: .online,
+            lastSeen: Date()
+        )
+
+        pairedDevices.removeAll { $0.id == identity }
+        pairedDevices.append(newDevice)
     }
 
     public func unpairDevice(id: String) {
         pairedDevices.removeAll { $0.id == id }
+        trustStore.unpair(identity: id)
     }
 
     public func removeTransferRecord(id: String) {

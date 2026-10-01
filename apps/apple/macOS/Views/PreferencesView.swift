@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import CryptoKit
+import CoreImage
 
 @MainActor
 public struct PreferencesView: View {
@@ -174,6 +176,24 @@ public struct PreferencesView: View {
         }
     }
 
+    @State private var qrPayload: QRPairingPayload?
+    @State private var localPakeCode: String = ""
+
+    private var currentQRUri: String {
+        return qrPayload?.toURI() ?? "nearside://pair?v=1"
+    }
+
+    private func generateQRCode(from string: String) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(string.utf8), forKey: "inputMessage")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 6, y: 6))
+        let rep = NSCIImageRep(ciImage: scaled)
+        let img = NSImage(size: rep.size)
+        img.addRepresentation(rep)
+        return img
+    }
+
     // MARK: - Pairing Sheet
     private var pairingSheet: some View {
         VStack(spacing: 16) {
@@ -193,67 +213,79 @@ public struct PreferencesView: View {
             .pickerStyle(.segmented)
 
             if pairMode == 0 {
-                VStack(spacing: 12) {
-                    Text("Scan this QR code with the Nearside app on your Android device:")
+                VStack(spacing: 10) {
+                    Text("Scan this QR code with Nearside on your Android device:")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
 
-                    // Simulated QR Code Frame for visual dummy layout
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.primary.opacity(0.2), lineWidth: 1)
-                            .frame(width: 180, height: 180)
+                    if let qrImage = generateQRCode(from: currentQRUri) {
+                        Image(nsImage: qrImage)
+                            .interpolation(.none)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 150, height: 150)
+                            .padding(6)
                             .background(Color.white)
-
-                        VStack(spacing: 8) {
-                            Image(systemName: "qrcode")
-                                .font(.system(size: 100))
-                                .foregroundColor(.black)
-                            Text("nearside://pair")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.gray)
-                        }
+                            .cornerRadius(8)
                     }
 
-                    Text("Fingerprint: \(appState.localFingerprint.prefix(16))...")
+                    Text("Session ID: \(qrPayload?.sessionId.prefix(8) ?? "")")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
-                .padding(.vertical, 8)
+                .padding(.vertical, 4)
             } else {
                 VStack(spacing: 14) {
-                    Text("Enter the 8-digit verification code shown on the peer device:")
+                    Text("Your Pairing Short Code:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Text(localPakeCode)
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(8)
+
+                    Text("Or enter code from peer:")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
                     TextField("12345678", text: $shortCodeInput)
-                        .font(.system(size: 24, weight: .bold, design: .monospaced))
+                        .font(.system(size: 20, weight: .bold, design: .monospaced))
                         .multilineTextAlignment(.center)
-                        .frame(width: 200)
+                        .frame(width: 180)
                         .textFieldStyle(.roundedBorder)
 
                     Button("Confirm Pairing") {
                         if shortCodeInput.count >= 6 {
-                            let newDev = NearsideDevice(
+                            let dummyKey = P256.Signing.PrivateKey().publicKey
+                            let devId = "ns1_sc_\(shortCodeInput)"
+                            appState.pairDevice(
+                                identity: devId,
                                 name: "Paired Peer (\(shortCodeInput.prefix(4)))",
-                                platform: .android,
-                                fingerprint: "ns1_mock_\(shortCodeInput)"
+                                platform: "android",
+                                publicKey: dummyKey
                             )
-                            appState.pairedDevices.append(newDev)
                             showingPairSheet = false
                             shortCodeInput = ""
                         }
                     }
                     .buttonStyle(.borderedProminent)
                 }
-                .padding(.vertical, 16)
+                .padding(.vertical, 10)
             }
 
             Spacer()
         }
-        .padding(24)
-        .frame(width: 380, height: 340)
+        .padding(20)
+        .frame(width: 380, height: 350)
+        .onAppear {
+            let payload = QRPairingPayload(hostIdentity: appState.localFingerprint, hostName: appState.localDeviceName)
+            self.qrPayload = payload
+            self.localPakeCode = String(format: "%04d %04d", Int.random(in: 1000...9999), Int.random(in: 1000...9999))
+        }
     }
 
     private func selectDownloadsFolder() {

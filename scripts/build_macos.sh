@@ -32,6 +32,11 @@ xcrun swiftc -O -emit-executable \
     -target arm64-apple-macos14.0 \
     -o "$APP_MACOS/Nearside" \
     apps/apple/Shared/DeviceModels.swift \
+    apps/apple/Shared/Crypto/DeviceIdentity.swift \
+    apps/apple/Shared/Crypto/PinnedTrustStore.swift \
+    apps/apple/Shared/Crypto/QRPairingProtocol.swift \
+    apps/apple/Shared/Crypto/ShortCodePakeProtocol.swift \
+    apps/apple/Shared/Discovery/DiscoveryService.swift \
     apps/apple/Shared/AppState.swift \
     apps/apple/macOS/Views/MenuBarShelfView.swift \
     apps/apple/macOS/Views/PreferencesView.swift \
