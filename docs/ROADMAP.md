@@ -29,7 +29,9 @@ Nearside is an open-source, local-first cross-platform file and content sharing 
 - [x] Direct Sharesheet to Receiver pipe (zero-click handoff to trusted peers).
 - [x] macOS Finder Drag-and-Drop and Android Sharesheet end-to-end transfers.
 
-### Milestone 4: Polish, Robustness, and Production Readiness (Next)
-- [ ] Network interruption recovery and auto-reconnect.
-- [ ] Power management optimization for background Android receivers.
-- [ ] Final security audit, packaging, and release automation.
+### Milestone 4: Polish, Robustness, and Production Readiness (Completed)
+- [x] Network interruption recovery, chunk-level resume protocol, and exponential backoff retry.
+- [x] Power management optimization for background Android receivers (reference-counted wake/wifi locks, live notifications).
+- [x] Path traversal security defense and zero-leak security audit.
+- [x] Production release packaging automation (macOS DMG and optimized Android release APK).
+
