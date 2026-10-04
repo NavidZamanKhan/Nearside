@@ -6,6 +6,7 @@ import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.model.TransferStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.DataInputStream
@@ -18,6 +19,17 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.UUID
+
+data class RetryPolicy(
+    val maxAttempts: Int = 3,
+    val initialDelayMs: Long = 500L,
+    val multiplier: Double = 2.0
+) {
+    fun delayMs(attempt: Int): Long {
+        if (attempt <= 0) return 0L
+        return (initialDelayMs * Math.pow(multiplier, (attempt - 1).toDouble())).toLong()
+    }
+}
 
 object TransferEngine {
 
@@ -55,82 +67,133 @@ object TransferEngine {
     suspend fun sendFiles(
         files: List<File>,
         host: String,
-        port: Int,
+        port: Int = 41433,
         senderId: String,
+        retryPolicy: RetryPolicy = RetryPolicy(),
         onProgress: (Float, Long, Long) -> Unit
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
-        try {
-            val manifest = buildManifest(files, senderId)
-            Socket(host, port).use { socket ->
-                socket.tcpNoDelay = true
-                socket.soTimeout = 15000
-                val out = DataOutputStream(socket.getOutputStream())
-                val input = DataInputStream(socket.getInputStream())
+        val manifest = buildManifest(files, senderId)
+        var lastException: Exception? = null
 
-                val manifestJson = manifest.toJson().toString().toByteArray(Charsets.UTF_8)
-                val mHeader = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
-                mHeader.putInt(TransferChunk.MAGIC)
-                mHeader.put(FrameType.MANIFEST.code)
-                mHeader.putInt(manifestJson.size)
-                out.write(mHeader.array())
-                out.write(manifestJson)
-                out.flush()
-
-                // Read ACK
-                val ackMagic = input.readInt()
-                if (ackMagic != TransferChunk.MAGIC) {
-                    return@withContext Result.failure(IllegalStateException("Invalid magic in ACK"))
+        for (attempt in 1..retryPolicy.maxAttempts) {
+            try {
+                return@withContext performSendAttempt(
+                    files = files,
+                    manifest = manifest,
+                    host = host,
+                    port = port,
+                    onProgress = onProgress
+                )
+            } catch (e: Exception) {
+                lastException = e
+                if (attempt < retryPolicy.maxAttempts) {
+                    delay(retryPolicy.delayMs(attempt))
                 }
-                val ackType = input.readByte()
-                if (ackType != FrameType.ACK.code) {
-                    return@withContext Result.failure(IllegalStateException("Unexpected response type $ackType"))
+            }
+        }
+        Result.failure(lastException ?: IllegalStateException("Failed to send files after ${retryPolicy.maxAttempts} attempts"))
+    }
+
+    private fun performSendAttempt(
+        files: List<File>,
+        manifest: TransferManifest,
+        host: String,
+        port: Int,
+        onProgress: (Float, Long, Long) -> Unit
+    ): Result<TransferManifest> {
+        Socket(host, port).use { socket ->
+            socket.tcpNoDelay = true
+            socket.soTimeout = 15000
+            val out = DataOutputStream(socket.getOutputStream())
+            val input = DataInputStream(socket.getInputStream())
+
+            val manifestJson = manifest.toJson().toString().toByteArray(Charsets.UTF_8)
+            val mHeader = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
+            mHeader.putInt(TransferChunk.MAGIC)
+            mHeader.put(FrameType.MANIFEST.code)
+            mHeader.putInt(manifestJson.size)
+            out.write(mHeader.array())
+            out.write(manifestJson)
+            out.flush()
+
+            // Read ACK
+            val ackMagic = input.readInt()
+            if (ackMagic != TransferChunk.MAGIC) {
+                return Result.failure(IllegalStateException("Invalid magic in ACK"))
+            }
+            val ackType = input.readByte()
+            if (ackType != FrameType.ACK.code) {
+                return Result.failure(IllegalStateException("Unexpected response type $ackType"))
+            }
+            val ackLen = input.readInt()
+            val ackPayload = ByteArray(ackLen)
+            input.readFully(ackPayload)
+
+            val ackJson = JSONObject(String(ackPayload, Charsets.UTF_8))
+            val ack = TransferAck.fromJson(ackJson)
+            if (ack.status != "ACCEPTED") {
+                return Result.failure(IllegalStateException("Transfer rejected: ${ack.status}"))
+            }
+
+            var remainingResume = ack.bytesReceived
+            var startItem = 0
+            var startOffset = 0L
+
+            for ((idx, item) in manifest.items.withIndex()) {
+                if (remainingResume >= item.size) {
+                    remainingResume -= item.size
+                    startItem = idx + 1
+                } else {
+                    startItem = idx
+                    startOffset = remainingResume
+                    remainingResume = 0L
+                    break
                 }
-                val ackLen = input.readInt()
-                val ackPayload = ByteArray(ackLen)
-                input.readFully(ackPayload)
+            }
 
-                val ackJson = JSONObject(String(ackPayload, Charsets.UTF_8))
-                val ack = TransferAck.fromJson(ackJson)
-                if (ack.status != "ACCEPTED") {
-                    return@withContext Result.failure(IllegalStateException("Transfer rejected: ${ack.status}"))
-                }
+            // Stream chunks starting from resume checkpoint
+            var totalTransferred = ack.bytesReceived
+            val totalBytes = manifest.totalBytes
+            val chunkBuffer = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
 
-                // Stream chunks
-                var totalTransferred = 0L
-                val totalBytes = manifest.totalBytes
-                val chunkBuffer = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
+            for (index in startItem until files.size) {
+                val file = files[index]
+                val itemManifest = manifest.items[index]
+                val initialSkip = if (index == startItem) startOffset else 0L
 
-                for ((index, file) in files.withIndex()) {
-                    var fileOffset = 0L
-                    FileInputStream(file).use { fis ->
-                        var read: Int
-                        while (fis.read(chunkBuffer).also { read = it } != -1) {
-                            val chunkData = chunkBuffer.copyOf(read)
-                            val chunk = TransferChunk(index, fileOffset, chunkData)
-                            out.write(chunk.encode())
-                            out.flush()
+                FileInputStream(file).use { fis ->
+                    if (initialSkip > 0) {
+                        fis.channel.position(initialSkip)
+                    }
+                    var fileOffset = initialSkip
+                    var read: Int
+                    while (fileOffset < itemManifest.size) {
+                        val toRead = Math.min(chunkBuffer.size.toLong(), itemManifest.size - fileOffset).toInt()
+                        read = fis.read(chunkBuffer, 0, toRead)
+                        if (read <= 0) break
+                        val chunkData = if (read == chunkBuffer.size) chunkBuffer else chunkBuffer.copyOf(read)
+                        val chunk = TransferChunk(index, fileOffset, chunkData)
+                        out.write(chunk.encode())
+                        out.flush()
 
-                            fileOffset += read
-                            totalTransferred += read
-                            val fraction = if (totalBytes > 0) totalTransferred.toFloat() / totalBytes else 1.0f
-                            onProgress(fraction, totalTransferred, totalBytes)
-                        }
+                        fileOffset += read
+                        totalTransferred += read
+                        val fraction = if (totalBytes > 0) totalTransferred.toFloat() / totalBytes else 1.0f
+                        onProgress(fraction, totalTransferred, totalBytes)
                     }
                 }
-
-                // Send Complete Frame
-                val cHeader = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
-                cHeader.putInt(TransferChunk.MAGIC)
-                cHeader.put(FrameType.COMPLETE.code)
-                cHeader.putInt(0)
-                out.write(cHeader.array())
-                out.flush()
-
-                onProgress(1.0f, totalBytes, totalBytes)
-                Result.success(manifest)
             }
-        } catch (e: Exception) {
-            Result.failure(e)
+
+            // Send Complete Frame
+            val cHeader = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
+            cHeader.putInt(TransferChunk.MAGIC)
+            cHeader.put(FrameType.COMPLETE.code)
+            cHeader.putInt(0)
+            out.write(cHeader.array())
+            out.flush()
+
+            onProgress(1.0f, totalBytes, totalBytes)
+            return Result.success(manifest)
         }
     }
 
@@ -162,6 +225,23 @@ object TransferEngine {
             val manifestObj = JSONObject(String(manifestBytes, Charsets.UTF_8))
             val manifest = TransferManifest.fromJson(manifestObj)
 
+            // Strict path traversal defense
+            for (item in manifest.items) {
+                val cleanName = File(item.name).name
+                if (cleanName != item.name || item.name.contains("..") || item.name.contains("/") || item.name.contains("\\")) {
+                    val err = ErrorFrame(400, "INVALID_FILENAME", "Invalid or unsafe filename: ${item.name}")
+                    val errBytes = err.toJson().toString().toByteArray(Charsets.UTF_8)
+                    val errH = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
+                    errH.putInt(TransferChunk.MAGIC)
+                    errH.put(FrameType.ERROR.code)
+                    errH.putInt(errBytes.size)
+                    out.write(errH.array())
+                    out.write(errBytes)
+                    out.flush()
+                    return@withContext Result.failure(SecurityException("Potential path traversal in item name: ${item.name}"))
+                }
+            }
+
             // Validate against trust store
             if (!trustStore.isEnrolled(manifest.senderId)) {
                 val err = ErrorFrame(403, "DEVICE_NOT_PAIRED", "Sender ${manifest.senderId} is not in trust store")
@@ -176,12 +256,61 @@ object TransferEngine {
                 return@withContext Result.failure(SecurityException("Untrusted sender: ${manifest.senderId}"))
             }
 
+            var totalResumed = 0L
+            val fileOutputs = mutableMapOf<Int, FileOutputStream>()
+            val fileDigests = mutableMapOf<Int, MessageDigest>()
+
+            for (item in manifest.items) {
+                val destFile = File(destinationDir, item.name)
+                val digest = MessageDigest.getInstance("SHA-256")
+                fileDigests[item.index] = digest
+
+                if (destFile.exists() && destFile.length() > 0 && destFile.length() <= item.size) {
+                    val existingLen = destFile.length()
+                    // Pre-hash existing bytes on disk
+                    destFile.inputStream().use { fis ->
+                        val buf = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
+                        var readTotal = 0L
+                        while (readTotal < existingLen) {
+                            val toRead = Math.min(buf.size.toLong(), existingLen - readTotal).toInt()
+                            val r = fis.read(buf, 0, toRead)
+                            if (r <= 0) break
+                            digest.update(buf, 0, r)
+                            readTotal += r
+                        }
+                    }
+                    totalResumed += existingLen
+
+                    if (existingLen == item.size) {
+                        val cloneDigest = MessageDigest.getInstance("SHA-256")
+                        destFile.inputStream().use { fis ->
+                            val buf = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
+                            var r: Int
+                            while (fis.read(buf).also { r = it } != -1) {
+                                cloneDigest.update(buf, 0, r)
+                            }
+                        }
+                        val calculatedHex = cloneDigest.digest().joinToString("") { "%02x".format(it) }
+                        if (calculatedHex == item.sha256) {
+                            // Completely finished
+                            continue
+                        }
+                    }
+
+                    fileOutputs[item.index] = FileOutputStream(destFile, true)
+                } else {
+                    if (destFile.exists()) destFile.delete()
+                    destFile.createNewFile()
+                    fileOutputs[item.index] = FileOutputStream(destFile, false)
+                }
+            }
+
             // Send ACK
             val ack = TransferAck(
                 transferId = manifest.transferId,
                 status = "ACCEPTED",
                 acceptedItems = manifest.items.map { it.index },
-                bytesReceived = 0L,
+                bytesReceived = totalResumed,
                 readyForStream = true
             )
             val ackBytes = ack.toJson().toString().toByteArray(Charsets.UTF_8)
@@ -201,21 +330,19 @@ object TransferEngine {
                 filename = manifest.items.firstOrNull()?.name ?: "Received File",
                 fileCount = manifest.itemCount,
                 totalSizeBytes = manifest.totalBytes,
-                progress = 0.0f,
+                progress = if (manifest.totalBytes > 0) totalResumed.toFloat() / manifest.totalBytes else 0.0f,
                 status = TransferStatus.TRANSFERRING,
                 timestamp = System.currentTimeMillis()
             )
 
-            // Receive chunks
-            val fileOutputs = mutableMapOf<Int, FileOutputStream>()
-            val fileDigests = mutableMapOf<Int, MessageDigest>()
-            for (item in manifest.items) {
-                val destFile = File(destinationDir, item.name)
-                fileOutputs[item.index] = FileOutputStream(destFile)
-                fileDigests[item.index] = MessageDigest.getInstance("SHA-256")
+            if (totalResumed == manifest.totalBytes && manifest.totalBytes > 0) {
+                fileOutputs.values.forEach { try { it.close() } catch (ignored: Exception) {} }
+                record = record.copy(progress = 1.0f, status = TransferStatus.COMPLETED)
+                onProgress(1.0f, record)
+                return@withContext Result.success(record)
             }
 
-            var totalReceived = 0L
+            var totalReceived = totalResumed
             val totalBytes = manifest.totalBytes
 
             try {

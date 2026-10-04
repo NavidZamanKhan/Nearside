@@ -22,6 +22,25 @@ public enum TransferEngineError: Error, LocalizedError {
     }
 }
 
+public struct RetryPolicy: Sendable {
+    public let maxAttempts: Int
+    public let initialDelay: TimeInterval
+    public let multiplier: Double
+
+    public static let `default` = RetryPolicy(maxAttempts: 3, initialDelay: 0.5, multiplier: 2.0)
+
+    public init(maxAttempts: Int = 3, initialDelay: TimeInterval = 0.5, multiplier: Double = 2.0) {
+        self.maxAttempts = maxAttempts
+        self.initialDelay = initialDelay
+        self.multiplier = multiplier
+    }
+
+    public func delay(forAttempt attempt: Int) -> TimeInterval {
+        guard attempt > 0 else { return 0 }
+        return initialDelay * pow(multiplier, Double(attempt - 1))
+    }
+}
+
 public final class TransferEngine: @unchecked Sendable {
     public static let shared = TransferEngine()
 
@@ -71,6 +90,7 @@ public final class TransferEngine: @unchecked Sendable {
         files: [URL],
         to device: NearsideDevice,
         senderId: String,
+        retryPolicy: RetryPolicy = .default,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         completion: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
@@ -87,21 +107,17 @@ public final class TransferEngine: @unchecked Sendable {
             let port = NWEndpoint.Port(rawValue: portNum) ?? NWEndpoint.Port(integerLiteral: 41433)
 
             let manifest: TransferManifest
-            let handles: [FileHandle]
             do {
                 let res = try self.buildManifest(for: files, senderId: senderId)
                 manifest = res.manifest
-                handles = res.fileHandles
+                for h in res.fileHandles { try? h.close() }
             } catch {
                 completion(.failure(TransferEngineError.fileAccessError(error.localizedDescription)))
                 return
             }
 
-            let connection = NWConnection(host: host, port: port, using: .tcp)
             let transferId = manifest.transferId
-            self.activeConnections[transferId] = connection
-
-            var record = TransferRecord(
+            let recordTemplate = TransferRecord(
                 id: transferId,
                 deviceName: device.name,
                 devicePlatform: device.platform,
@@ -114,43 +130,84 @@ public final class TransferEngine: @unchecked Sendable {
                 timestamp: Date()
             )
 
-            connection.stateUpdateHandler = { [weak self] state in
-                guard let self = self else { return }
-                switch state {
-                case .ready:
-                    self.performOutboundStream(
-                        connection: connection,
-                        manifest: manifest,
-                        fileHandles: handles,
-                        onProgress: onProgress,
-                        onComplete: { result in
-                            self.activeConnections.removeValue(forKey: transferId)
-                            connection.cancel()
-                            for handle in handles { try? handle.close() }
+            func executeAttempt(attempt: Int) {
+                var handles: [FileHandle] = []
+                for fileURL in files {
+                    guard let h = try? FileHandle(forReadingFrom: fileURL) else {
+                        for opened in handles { try? opened.close() }
+                        completion(.failure(TransferEngineError.fileAccessError("Cannot open file: \(fileURL.path)")))
+                        return
+                    }
+                    handles.append(h)
+                }
 
-                            switch result {
-                            case .success:
-                                record.progress = 1.0
-                                record.status = .completed
-                                completion(.success(record))
-                            case .failure(let err):
-                                record.status = .failed
-                                completion(.failure(err))
-                            }
-                        }
-                    )
-                case .failed(let err):
+                let connection = NWConnection(host: host, port: port, using: .tcp)
+                self.activeConnections[transferId] = connection
+
+                var hasCompletedOrRetried = false
+                let lock = NSLock()
+
+                func handleAttemptFailure(error: Error) {
+                    lock.lock()
+                    guard !hasCompletedOrRetried else {
+                        lock.unlock()
+                        return
+                    }
+                    hasCompletedOrRetried = true
+                    lock.unlock()
+
                     self.activeConnections.removeValue(forKey: transferId)
                     connection.cancel()
-                    for handle in handles { try? handle.close() }
-                    record.status = .failed
-                    completion(.failure(TransferEngineError.connectionFailed(err.localizedDescription)))
-                default:
-                    break
+                    for h in handles { try? h.close() }
+
+                    if attempt < retryPolicy.maxAttempts {
+                        let delay = retryPolicy.delay(forAttempt: attempt)
+                        self.queue.asyncAfter(deadline: .now() + delay) {
+                            executeAttempt(attempt: attempt + 1)
+                        }
+                    } else {
+                        completion(.failure(error))
+                    }
                 }
+
+                connection.stateUpdateHandler = { [weak self] state in
+                    guard let self = self else { return }
+                    switch state {
+                    case .ready:
+                        self.performOutboundStream(
+                            connection: connection,
+                            manifest: manifest,
+                            fileHandles: handles,
+                            onProgress: onProgress,
+                            onComplete: { result in
+                                switch result {
+                                case .success:
+                                    lock.lock()
+                                    hasCompletedOrRetried = true
+                                    lock.unlock()
+                                    self.activeConnections.removeValue(forKey: transferId)
+                                    connection.cancel()
+                                    for h in handles { try? h.close() }
+                                    var finalRecord = recordTemplate
+                                    finalRecord.progress = 1.0
+                                    finalRecord.status = .completed
+                                    completion(.success(finalRecord))
+                                case .failure(let err):
+                                    handleAttemptFailure(error: err)
+                                }
+                            }
+                        )
+                    case .failed(let err):
+                        handleAttemptFailure(error: TransferEngineError.connectionFailed(err.localizedDescription))
+                    default:
+                        break
+                    }
+                }
+
+                connection.start(queue: self.queue)
             }
 
-            connection.start(queue: self.queue)
+            executeAttempt(attempt: 1)
         }
     }
 
@@ -189,10 +246,29 @@ public final class TransferEngine: @unchecked Sendable {
                         onComplete(.failure(TransferEngineError.manifestRejected(ack.status)))
                         return
                     }
+
+                    var remainingResume = ack.bytesReceived
+                    var startItem = 0
+                    var startOffset: UInt64 = 0
+                    for (idx, item) in manifest.items.enumerated() {
+                        if remainingResume >= item.size {
+                            remainingResume -= item.size
+                            startItem = idx + 1
+                        } else {
+                            startItem = idx
+                            startOffset = UInt64(remainingResume)
+                            remainingResume = 0
+                            break
+                        }
+                    }
+
                     self.streamFileChunks(
                         connection: connection,
                         manifest: manifest,
                         fileHandles: fileHandles,
+                        startItemIndex: startItem,
+                        startOffset: startOffset,
+                        initialBytesTransferred: ack.bytesReceived,
                         onProgress: onProgress,
                         onComplete: onComplete
                     )
@@ -234,11 +310,14 @@ public final class TransferEngine: @unchecked Sendable {
         connection: NWConnection,
         manifest: TransferManifest,
         fileHandles: [FileHandle],
+        startItemIndex: Int = 0,
+        startOffset: UInt64 = 0,
+        initialBytesTransferred: Int64 = 0,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         onComplete: @escaping (Result<Void, Error>) -> Void
     ) {
         let totalBytes = manifest.totalBytes
-        var bytesTransferred: Int64 = 0
+        var bytesTransferred: Int64 = initialBytesTransferred
 
         func sendNextChunk(itemIndex: Int, offset: UInt64) {
             guard itemIndex < fileHandles.count else {
@@ -265,6 +344,9 @@ public final class TransferEngine: @unchecked Sendable {
             let chunkData = handle.readData(ofLength: TransferChunk.maxChunkSize)
 
             if chunkData.isEmpty {
+                if itemIndex + 1 < fileHandles.count {
+                    try? fileHandles[itemIndex + 1].seek(toOffset: 0)
+                }
                 sendNextChunk(itemIndex: itemIndex + 1, offset: 0)
                 return
             }
@@ -286,7 +368,10 @@ public final class TransferEngine: @unchecked Sendable {
             })
         }
 
-        sendNextChunk(itemIndex: 0, offset: 0)
+        if startItemIndex < fileHandles.count {
+            try? fileHandles[startItemIndex].seek(toOffset: startOffset)
+        }
+        sendNextChunk(itemIndex: startItemIndex, offset: startOffset)
     }
 
     public func handleInboundConnection(
@@ -319,24 +404,92 @@ public final class TransferEngine: @unchecked Sendable {
                     return
                 }
 
+                // Strict path traversal defense
+                for item in manifest.items {
+                    let cleanName = (item.name as NSString).lastPathComponent
+                    guard !cleanName.isEmpty,
+                          cleanName != ".",
+                          cleanName != "..",
+                          cleanName == item.name,
+                          !item.name.contains("/"),
+                          !item.name.contains("\\") else {
+                        self.sendError(connection: connection, code: 400, reason: "INVALID_FILENAME", detail: "Potential path traversal in item name")
+                        onComplete(.failure(TransferEngineError.manifestRejected("Invalid filename: \(item.name)")))
+                        return
+                    }
+                }
+
                 guard trustStore.isEnrolled(identity: manifest.senderId) else {
                     self.sendError(connection: connection, code: 403, reason: "DEVICE_NOT_PAIRED", detail: "Sender \(manifest.senderId) is not trusted.")
                     onComplete(.failure(TransferEngineError.untrustedPeer(manifest.senderId)))
                     return
                 }
 
+                var totalResumedBytes: Int64 = 0
+                var initialHandles: [Int: FileHandle] = [:]
+                var initialHashers: [Int: SHA256] = [:]
+
+                for item in manifest.items {
+                    let destURL = destinationFolder.appendingPathComponent(item.name)
+                    var itemHasher = SHA256()
+
+                    if FileManager.default.fileExists(atPath: destURL.path),
+                       let attrs = try? FileManager.default.attributesOfItem(atPath: destURL.path),
+                       let fileSize = (attrs[.size] as? NSNumber)?.int64Value,
+                       fileSize > 0 && fileSize <= item.size {
+
+                        if let readHandle = try? FileHandle(forReadingFrom: destURL) {
+                            var bytesHashed: Int64 = 0
+                            while bytesHashed < fileSize {
+                                let chunk = readHandle.readData(ofLength: TransferChunk.maxChunkSize)
+                                if chunk.isEmpty { break }
+                                itemHasher.update(data: chunk)
+                                bytesHashed += Int64(chunk.count)
+                            }
+                            try? readHandle.close()
+                        }
+
+                        if fileSize == item.size {
+                            let calculated = itemHasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
+                            if calculated == item.sha256 {
+                                totalResumedBytes += fileSize
+                                initialHashers[item.index] = itemHasher
+                                continue
+                            }
+                        }
+
+                        if let writeHandle = try? FileHandle(forUpdating: destURL) {
+                            try? writeHandle.seek(toOffset: UInt64(fileSize))
+                            initialHandles[item.index] = writeHandle
+                            initialHashers[item.index] = itemHasher
+                            totalResumedBytes += fileSize
+                            continue
+                        }
+                    }
+
+                    FileManager.default.createFile(atPath: destURL.path, contents: nil)
+                    if let handle = try? FileHandle(forWritingTo: destURL) {
+                        initialHandles[item.index] = handle
+                        initialHashers[item.index] = SHA256()
+                    }
+                }
+
                 let ack = TransferAck(
                     transferId: manifest.transferId,
                     status: "ACCEPTED",
                     acceptedItems: manifest.items.map { $0.index },
-                    bytesReceived: 0,
+                    bytesReceived: totalResumedBytes,
                     readyForStream: true
                 )
+
                 self.sendAck(connection: connection, ack: ack) {
                     self.receiveInboundChunks(
                         connection: connection,
                         manifest: manifest,
                         destinationFolder: destinationFolder,
+                        initialHandles: initialHandles,
+                        initialHashers: initialHashers,
+                        initialBytesReceived: totalResumedBytes,
                         onProgress: onProgress,
                         onComplete: onComplete
                     )
@@ -382,6 +535,9 @@ public final class TransferEngine: @unchecked Sendable {
         connection: NWConnection,
         manifest: TransferManifest,
         destinationFolder: URL,
+        initialHandles: [Int: FileHandle],
+        initialHashers: [Int: SHA256],
+        initialBytesReceived: Int64,
         onProgress: @escaping (Double, TransferRecord) -> Void,
         onComplete: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
@@ -393,25 +549,26 @@ public final class TransferEngine: @unchecked Sendable {
             filename: manifest.items.first?.name ?? "Incoming File",
             fileCount: manifest.itemCount,
             totalSizeBytes: manifest.totalBytes,
-            progress: 0.0,
+            progress: (manifest.totalBytes > 0) ? Double(initialBytesReceived) / Double(manifest.totalBytes) : 0.0,
             status: .transferring,
             timestamp: Date()
         )
 
-        var initialHandles: [Int: FileHandle] = [:]
-        var initialHashers: [Int: SHA256] = [:]
-        var bytesReceived: Int64 = 0
-
-        for item in manifest.items {
-            let destURL = destinationFolder.appendingPathComponent(item.name)
-            FileManager.default.createFile(atPath: destURL.path, contents: nil)
-            if let handle = try? FileHandle(forWritingTo: destURL) {
-                initialHandles[item.index] = handle
-                initialHashers[item.index] = SHA256()
-            }
-        }
         let itemHandles = initialHandles
         var itemHashers = initialHashers
+        var bytesReceived: Int64 = initialBytesReceived
+
+        func closeHandles() {
+            for (_, h) in itemHandles { try? h.close() }
+        }
+
+        if initialBytesReceived == manifest.totalBytes && manifest.totalBytes > 0 {
+            closeHandles()
+            currentRecord.progress = 1.0
+            currentRecord.status = .completed
+            onComplete(.success(currentRecord))
+            return
+        }
 
         func receiveNext() {
             connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { headerData, _, _, error in
@@ -466,6 +623,7 @@ public final class TransferEngine: @unchecked Sendable {
                     }
 
                     let itemIndex = Int(r.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+                    let offset = r.subdata(in: 4..<12).withUnsafeBytes { $0.load(as: UInt64.self) }.bigEndian
                     let chunkPayload = r.subdata(in: 12..<(12 + payloadLen))
                     let presentedHash = r.subdata(in: (12 + payloadLen)..<remainingExpected)
 
@@ -477,6 +635,7 @@ public final class TransferEngine: @unchecked Sendable {
                     }
 
                     if let handle = itemHandles[itemIndex] {
+                        try? handle.seek(toOffset: offset)
                         handle.write(chunkPayload)
                         itemHashers[itemIndex]?.update(data: chunkPayload)
                     }
@@ -489,10 +648,6 @@ public final class TransferEngine: @unchecked Sendable {
                     receiveNext()
                 }
             }
-        }
-
-        func closeHandles() {
-            for (_, h) in itemHandles { try? h.close() }
         }
 
         receiveNext()
