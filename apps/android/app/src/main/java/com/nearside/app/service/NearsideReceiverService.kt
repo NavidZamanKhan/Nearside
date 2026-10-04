@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.ServerSocket
+import java.util.UUID
 
 class NearsideReceiverService : Service() {
 
@@ -64,8 +65,13 @@ class NearsideReceiverService : Service() {
         }
     }
 
+    private lateinit var powerLockManager: PowerLockManager
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var serverSocket: ServerSocket? = null
+
     override fun onCreate() {
         super.onCreate()
+        powerLockManager = PowerLockManager(this)
         createNotificationChannel()
     }
 
@@ -73,6 +79,7 @@ class NearsideReceiverService : Service() {
         when (intent?.action) {
             ACTION_PAUSE -> {
                 isReceiving = false
+                powerLockManager.releaseAll()
                 updateNotification(isPaused = true)
             }
             ACTION_RESUME -> {
@@ -81,6 +88,7 @@ class NearsideReceiverService : Service() {
             }
             ACTION_STOP -> {
                 isReceiving = false
+                powerLockManager.releaseAll()
                 stopTcpListener()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -105,9 +113,6 @@ class NearsideReceiverService : Service() {
         return START_STICKY
     }
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var serverSocket: ServerSocket? = null
-
     private fun startTcpListener() {
         stopTcpListener()
         try {
@@ -126,14 +131,23 @@ class NearsideReceiverService : Service() {
                             continue
                         }
                         serviceScope.launch {
-                            TransferEngine.handleInboundConnection(
-                                socket = client,
-                                trustStore = trustStore,
-                                destinationDir = destDir,
-                                onProgress = { progress, record ->
-                                    // Update notification or emit event
+                            val transferTag = "rx_${UUID.randomUUID().toString().take(8)}"
+                            powerLockManager.acquire(transferTag)
+                            try {
+                                TransferEngine.handleInboundConnection(
+                                    socket = client,
+                                    trustStore = trustStore,
+                                    destinationDir = destDir,
+                                    onProgress = { progress, record ->
+                                        updateTransferProgressNotification(record.filename, progress)
+                                    }
+                                )
+                            } finally {
+                                powerLockManager.release(transferTag)
+                                if (powerLockManager.activeCount == 0) {
+                                    updateNotification(isPaused = false)
                                 }
-                            )
+                            }
                         }
                     } catch (e: Exception) {
                         break
@@ -154,6 +168,7 @@ class NearsideReceiverService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        powerLockManager.releaseAll()
         stopTcpListener()
         serviceScope.cancel()
     }
@@ -178,6 +193,30 @@ class NearsideReceiverService : Service() {
     private fun updateNotification(isPaused: Boolean) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(isPaused))
+    }
+
+    private fun updateTransferProgressNotification(filename: String, progress: Float) {
+        val pct = (progress * 100).toInt().coerceIn(0, 100)
+        val openIntent = Intent(this, MainActivity::class.java)
+        val contentPendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_nearside)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText("Receiving $filename ($pct%)")
+            .setProgress(100, pct, false)
+            .setContentIntent(contentPendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(isPaused: Boolean): Notification {
