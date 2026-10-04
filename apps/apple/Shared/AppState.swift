@@ -2,6 +2,9 @@ import Foundation
 import Combine
 import SwiftUI
 import CryptoKit
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 public final class AppState: ObservableObject {
@@ -25,11 +28,20 @@ public final class AppState: ObservableObject {
         self.deviceIdentity = identity
         self.trustStore = PinnedTrustStore()
 
+#if os(macOS)
         let hostName = Host.current().localizedName ?? "MacBook Pro"
-        self.localDeviceName = hostName
-        self.localFingerprint = identity.publicIdentity
         self.downloadsFolderURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+#elseif os(iOS)
+        let hostName = UIDevice.current.name
+        self.downloadsFolderURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")
+#else
+        let hostName = "Apple Device"
+        self.downloadsFolderURL = URL(fileURLWithPath: NSHomeDirectory())
+#endif
+        self.localDeviceName = hostName
+        self.localFingerprint = identity.publicIdentity
 
         loadInitialTrustAndSeedData()
         startDiscoveryEngine()
@@ -126,7 +138,7 @@ public final class AppState: ObservableObject {
         ]
     }
 
-    private func startDiscoveryEngine() {
+    public func startDiscoveryEngine() {
         let service = DiscoveryService.shared
         service.onDiscoveredDevicesChanged = { [weak self] devices in
             guard let self = self else { return }

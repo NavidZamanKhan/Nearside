@@ -35,3 +35,11 @@ Nearside is an open-source, local-first cross-platform file and content sharing 
 - [x] Path traversal security defense and zero-leak security audit.
 - [x] Production release packaging automation (macOS DMG and optimized Android release APK).
 
+### Milestone 5: Native iOS Platform Port & Share Extension (Completed)
+- [x] Multiplatform shared core alignment across macOS and iOS (`UIDevice` device naming, sandbox Documents storage).
+- [x] Native iOS SwiftUI application shell (`NearsideHomeView`, `NearsideSettingsView`, and `NearsideIOSApp`).
+- [x] Native AVFoundation camera QR scanner (`QRPairingScannerView`) with 8-digit numeric PAKE short code fallback.
+- [x] Native iOS Share Extension target (`ShareViewController` + `IOSShareRecipientPickerView`) with eager attachment staging.
+- [x] Automated iOS build pipeline (`scripts/build_ios.sh`), test harness (`Milestone5Tests.swift`), and full multiplatform verification (`scripts/verify_milestone5.sh`).
+
+
