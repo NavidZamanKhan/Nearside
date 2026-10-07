@@ -6,6 +6,17 @@ public enum PairingError: Error, Equatable {
     case invalidSecret
     case verificationFailed
     case malformedPayload
+
+    public func toNearsideError(correlationId: String? = nil) -> NearsideError {
+        switch self {
+        case .sessionExpired:
+            return NearsideError(code: .pairingSessionExpired, operation: "verifyQR", message: "QR pairing session expired", correlationId: correlationId)
+        case .invalidSecret, .verificationFailed:
+            return NearsideError(code: .pairingVerificationFailed, operation: "verifyQR", message: "QR pairing verification failed", correlationId: correlationId)
+        case .malformedPayload:
+            return NearsideError(code: .pairingMalformedPayload, operation: "parseQR", message: "Malformed QR pairing payload", correlationId: correlationId)
+        }
+    }
 }
 
 public struct QRPairingPayload: Codable {

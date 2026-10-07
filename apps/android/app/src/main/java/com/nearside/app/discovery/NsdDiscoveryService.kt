@@ -5,6 +5,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.util.Log
+import com.nearside.app.diagnostics.*
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.DeviceReachability
 import com.nearside.app.model.NearsideDevice
@@ -59,18 +60,23 @@ class NsdDiscoveryService(context: Context) {
         registrationListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(service: NsdServiceInfo) {
                 Log.i(TAG, "NSD advertisement registered: ${service.serviceName}")
+                NearsideLogger.info("discovery", "registerService", "NSD advertisement registered: ${service.serviceName}", state = "advertising")
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e(TAG, "NSD advertisement registration failed: $errorCode")
+                val err = NearsideError(NearsideErrorCode.DISCOVERY_REGISTRATION_FAILED, "registerService", "NSD registration failed: $errorCode")
+                NearsideLogger.error(err, state = "failed")
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
                 Log.i(TAG, "NSD advertisement unregistered")
+                NearsideLogger.info("discovery", "unregisterService", "NSD advertisement unregistered", state = "stopped")
             }
 
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e(TAG, "NSD advertisement unregistration failed: $errorCode")
+                NearsideLogger.warn("discovery", "unregisterService", "NSD advertisement unregistration failed: $errorCode")
             }
         }
 
@@ -78,6 +84,8 @@ class NsdDiscoveryService(context: Context) {
             nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
         } catch (e: Exception) {
             Log.e(TAG, "Error registering NSD service", e)
+            val err = NearsideError(NearsideErrorCode.DISCOVERY_REGISTRATION_FAILED, "registerService", "Error registering NSD service: ${e.message}", underlyingError = e)
+            NearsideLogger.error(err, state = "failed")
         }
     }
 
@@ -100,27 +108,34 @@ class NsdDiscoveryService(context: Context) {
         discoveryListener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e(TAG, "Discovery start failed: $errorCode")
+                val err = NearsideError(NearsideErrorCode.DISCOVERY_BROWSER_FAILED, "startDiscovery", "Discovery start failed: $errorCode")
+                NearsideLogger.error(err, state = "failed")
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e(TAG, "Discovery stop failed: $errorCode")
+                NearsideLogger.warn("discovery", "stopDiscovery", "Discovery stop failed: $errorCode")
             }
 
             override fun onDiscoveryStarted(serviceType: String) {
                 Log.i(TAG, "Discovery started for $serviceType")
+                NearsideLogger.info("discovery", "startDiscovery", "Discovery started for $serviceType", state = "browsing")
             }
 
             override fun onDiscoveryStopped(serviceType: String) {
                 Log.i(TAG, "Discovery stopped for $serviceType")
+                NearsideLogger.info("discovery", "stopDiscovery", "Discovery stopped for $serviceType", state = "stopped")
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 Log.i(TAG, "Service found: ${serviceInfo.serviceName}")
+                NearsideLogger.debug("discovery", "onServiceFound", "Discovered service: ${serviceInfo.serviceName}")
                 resolveService(serviceInfo)
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 Log.i(TAG, "Service lost: ${serviceInfo.serviceName}")
+                NearsideLogger.debug("discovery", "onServiceLost", "Lost service: ${serviceInfo.serviceName}")
                 discoveredMap.remove(serviceInfo.serviceName)
                 _discoveredDevices.value = discoveredMap.values.toList()
             }
@@ -130,6 +145,8 @@ class NsdDiscoveryService(context: Context) {
             nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
         } catch (e: Exception) {
             Log.e(TAG, "Error starting discovery", e)
+            val err = NearsideError(NearsideErrorCode.DISCOVERY_BROWSER_FAILED, "startDiscovery", "Error starting discovery: ${e.message}", underlyingError = e)
+            NearsideLogger.error(err, state = "failed")
         }
     }
 
@@ -137,6 +154,7 @@ class NsdDiscoveryService(context: Context) {
         val resolveListener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(service: NsdServiceInfo, errorCode: Int) {
                 Log.w(TAG, "Resolve failed for ${service.serviceName}: $errorCode")
+                NearsideLogger.warn("discovery", "resolveService", "Resolve failed for ${service.serviceName}: $errorCode", errorCode = NearsideErrorCode.DISCOVERY_RESOLVE_FAILED)
             }
 
             override fun onServiceResolved(service: NsdServiceInfo) {

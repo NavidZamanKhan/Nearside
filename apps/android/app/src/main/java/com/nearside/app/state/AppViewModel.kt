@@ -272,9 +272,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 _uiState.update { current ->
+                    val failureException = res.exceptionOrNull()
+                    val nearsideErr = failureException as? com.nearside.app.diagnostics.NearsideError
+                    val errorCode = nearsideErr?.code?.code ?: (if (res.isSuccess) null else com.nearside.app.diagnostics.NearsideErrorCode.TRANSFER_INTERRUPTED.code)
+                    val errorMessage = failureException?.message
+
                     val finished = current.activeTransfer?.copy(
                         progress = 1.0f,
-                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED
+                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED,
+                        errorCode = errorCode,
+                        errorMessage = errorMessage,
+                        correlationId = current.activeTransfer.id
                     )
                     val updatedHistory = if (finished != null) {
                         listOf(finished) + current.recentTransfers
@@ -385,9 +393,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 _uiState.update { current ->
+                    val failureException = res.exceptionOrNull()
+                    val nearsideErr = failureException as? com.nearside.app.diagnostics.NearsideError
+                    val errorCode = nearsideErr?.code?.code ?: (if (res.isSuccess) null else com.nearside.app.diagnostics.NearsideErrorCode.TRANSFER_INTERRUPTED.code)
+                    val errorMessage = failureException?.message
+
                     val finished = current.activeTransfer?.copy(
                         progress = 1.0f,
-                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED
+                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED,
+                        errorCode = errorCode,
+                        errorMessage = errorMessage,
+                        correlationId = current.activeTransfer.id
                     )
                     val updatedHistory = if (finished != null) {
                         listOf(finished) + current.recentTransfers
@@ -396,7 +412,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     current.copy(
                         activeTransfer = null,
                         recentTransfers = updatedHistory,
-                        toastMessage = if (res.isSuccess) "Clipboard sent to ${device.name}" else "Failed to send clipboard"
+                        toastMessage = if (res.isSuccess) "Clipboard sent to ${device.name}" else "Failed to send clipboard: ${errorMessage ?: "Transfer error"}"
                     )
                 }
                 delay(2000)

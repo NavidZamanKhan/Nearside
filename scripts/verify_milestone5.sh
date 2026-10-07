@@ -40,6 +40,7 @@ fi
 # 4. Run macOS Milestone 2 Test Suite
 echo "[4/10] Running macOS Milestone 2 Discovery & Crypto Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
@@ -54,6 +55,7 @@ echo "  -> Verified: macOS Milestone 2 test suite (28 assertions passed)."
 # 5. Run macOS Milestone 3 Test Suite
 echo "[5/10] Running macOS Milestone 3 Transfer Engine Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
@@ -70,6 +72,7 @@ echo "  -> Verified: macOS Milestone 3 test suite (14 assertions passed)."
 # 6. Run macOS Milestone 4 Test Suite
 echo "[6/10] Running macOS Milestone 4 Robustness, Path Traversal & Resume Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
@@ -86,6 +89,7 @@ echo "  -> Verified: macOS Milestone 4 test suite (13 assertions passed)."
 # 7. Run iOS Milestone 5 Platform Test Suite
 echo "[7/10] Running iOS Milestone 5 Platform Test Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \

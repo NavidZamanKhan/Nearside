@@ -1,6 +1,7 @@
 package com.nearside.app.crypto
 
 import android.content.Context
+import com.nearside.app.diagnostics.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -48,11 +49,17 @@ class PinnedTrustStore(private val storageFile: File? = null) {
             enrolledAtMillis = System.currentTimeMillis()
         )
         saveToDisk()
+        NearsideLogger.info("trust", "enroll", "Enrolled trusted peer", metadata = mapOf(
+            "peer" to NearsideRedactor.sanitizeIdentity(identity),
+            "name" to name,
+            "platform" to platform
+        ))
     }
 
     fun block(identity: String) {
         blockedIdentities.add(identity)
         saveToDisk()
+        NearsideLogger.info("trust", "block", "Blocked peer identity", metadata = mapOf("peer" to NearsideRedactor.sanitizeIdentity(identity)))
     }
 
     fun unpair(identity: String) {
@@ -60,6 +67,7 @@ class PinnedTrustStore(private val storageFile: File? = null) {
         peerMetadata.remove(identity)
         blockedIdentities.remove(identity)
         saveToDisk()
+        NearsideLogger.info("trust", "unpair", "Unpaired peer", metadata = mapOf("peer" to NearsideRedactor.sanitizeIdentity(identity)))
     }
 
     fun isEnrolled(identity: String): Boolean = enrolledKeys.containsKey(identity)
@@ -70,13 +78,29 @@ class PinnedTrustStore(private val storageFile: File? = null) {
         val identity = DeviceIdentity.computeIdentity(presentedSpki)
 
         if (blockedIdentities.contains(identity)) {
+            NearsideLogger.warn("trust", "validatePeer", "Blocked peer attempted access", metadata = mapOf(
+                "peer" to NearsideRedactor.sanitizeIdentity(identity),
+                "code" to NearsideErrorCode.TRUST_PEER_BLOCKED.code
+            ))
             return TrustResult.PeerBlocked(identity)
         }
 
         val enrolledKey = enrolledKeys[identity]
-            ?: return TrustResult.UntrustedPeer(identity)
+            ?: run {
+                NearsideLogger.warn("trust", "validatePeer", "Untrusted peer attempted access", metadata = mapOf(
+                    "peer" to NearsideRedactor.sanitizeIdentity(identity),
+                    "code" to NearsideErrorCode.TRUST_UNTRUSTED_PEER.code
+                ))
+                return TrustResult.UntrustedPeer(identity)
+            }
 
         if (!enrolledKey.encoded.contentEquals(presentedSpki)) {
+            val err = NearsideError(
+                NearsideErrorCode.TRUST_KEY_MISMATCH,
+                "validatePeer",
+                "Presented SPKI does not match pinned SPKI for peer ${NearsideRedactor.sanitizeIdentity(identity)}"
+            )
+            NearsideLogger.error(err, state = "failed")
             return TrustResult.KeyMismatch(identity)
         }
 

@@ -44,11 +44,17 @@ public final class PinnedTrustStore {
             enrolledAt: Date()
         )
         saveToDisk()
+        NearsideLogger.shared.info("trust", "enroll", "Enrolled trusted peer", metadata: [
+            "peer": NearsideRedactor.sanitizeIdentity(identity),
+            "name": name,
+            "platform": platform
+        ])
     }
 
     public func block(identity: String) {
         blockedIdentities.insert(identity)
         saveToDisk()
+        NearsideLogger.shared.info("trust", "block", "Blocked peer identity", metadata: ["peer": NearsideRedactor.sanitizeIdentity(identity)])
     }
 
     public func unpair(identity: String) {
@@ -56,6 +62,7 @@ public final class PinnedTrustStore {
         peerMetadata.removeValue(forKey: identity)
         blockedIdentities.remove(identity)
         saveToDisk()
+        NearsideLogger.shared.info("trust", "unpair", "Unpaired peer", metadata: ["peer": NearsideRedactor.sanitizeIdentity(identity)])
     }
 
     public func isEnrolled(identity: String) -> Bool {
@@ -70,14 +77,28 @@ public final class PinnedTrustStore {
         let identity = DeviceIdentity.computeIdentity(fromSpki: presentedSpki)
 
         if blockedIdentities.contains(identity) {
+            NearsideLogger.shared.warn("trust", "validatePeer", "Blocked peer attempted access", metadata: [
+                "peer": NearsideRedactor.sanitizeIdentity(identity),
+                "code": NearsideErrorCode.trustPeerBlocked.rawValue
+            ])
             return .failure(.peerBlocked(identity: identity))
         }
 
         guard let enrolledKey = enrolledKeys[identity] else {
+            NearsideLogger.shared.warn("trust", "validatePeer", "Untrusted peer attempted access", metadata: [
+                "peer": NearsideRedactor.sanitizeIdentity(identity),
+                "code": NearsideErrorCode.trustUntrustedPeer.rawValue
+            ])
             return .failure(.untrustedPeer(identity: identity))
         }
 
         guard enrolledKey.derRepresentation == presentedSpki else {
+            let err = NearsideError(
+                code: .trustKeyMismatch,
+                operation: "validatePeer",
+                message: "Presented SPKI does not match pinned SPKI for peer \(NearsideRedactor.sanitizeIdentity(identity))"
+            )
+            NearsideLogger.shared.error(err, state: "failed")
             return .failure(.keyMismatch(identity: identity))
         }
 

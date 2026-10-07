@@ -25,6 +25,23 @@ public enum TransferEngineError: Error, LocalizedError {
         case .cancelled: return "Transfer was cancelled"
         }
     }
+
+    public func toNearsideError(operation: String = "transfer", correlationId: String? = nil, retryCount: Int? = nil) -> NearsideError {
+        switch self {
+        case .connectionFailed(let msg):
+            return NearsideError(code: .connectionTimedOut, operation: operation, message: msg, underlyingError: self, correlationId: correlationId, retryCount: retryCount)
+        case .untrustedPeer(let peer):
+            return NearsideError(code: .trustUntrustedPeer, operation: operation, message: "Peer \(NearsideRedactor.sanitizeIdentity(peer)) is untrusted", underlyingError: self, correlationId: correlationId, retryCount: retryCount)
+        case .manifestRejected(let reason):
+            return NearsideError(code: .transferRejected, operation: operation, message: reason, underlyingError: self, correlationId: correlationId, retryCount: retryCount)
+        case .integrityMismatch(let item):
+            return NearsideError(code: .verifyFileChecksumMismatch, operation: operation, message: "Checksum mismatch for \(item)", underlyingError: self, correlationId: correlationId, retryCount: retryCount)
+        case .fileAccessError(let msg):
+            return NearsideError(code: .storageReadFailed, operation: operation, message: msg, underlyingError: self, correlationId: correlationId, retryCount: retryCount)
+        case .cancelled:
+            return NearsideError(code: .transferCancelled, operation: operation, message: "Transfer was cancelled", underlyingError: self, correlationId: correlationId, retryCount: retryCount)
+        }
+    }
 }
 
 public struct RetryPolicy: Sendable {
@@ -192,15 +209,44 @@ public final class TransferEngine: @unchecked Sendable {
                 status: .transferring,
                 timestamp: Date(),
                 payloadType: initialPayloadType,
-                payloadText: initialPayloadText
+                payloadText: initialPayloadText,
+                correlationId: transferId
+            )
+
+            NearsideLogger.shared.info(
+                "transfer",
+                "sendFiles",
+                "Starting outbound transfer with \(files.count) file(s)",
+                state: "starting",
+                correlationId: transferId,
+                metadata: [
+                    "totalBytes": "\(manifest.totalBytes)",
+                    "destination": NearsideRedactor.sanitizeIdentity(device.fingerprint)
+                ]
             )
 
             func executeAttempt(attempt: Int) {
+                NearsideLogger.shared.debug(
+                    "transfer",
+                    "executeAttempt",
+                    "Beginning connection attempt \(attempt)/\(retryPolicy.maxAttempts)",
+                    state: "connecting",
+                    correlationId: transferId,
+                    metadata: ["attempt": "\(attempt)", "maxAttempts": "\(retryPolicy.maxAttempts)"]
+                )
+
                 var handles: [FileHandle] = []
                 for fileURL in files {
                     guard let h = try? FileHandle(forReadingFrom: fileURL) else {
                         for opened in handles { try? opened.close() }
-                        completion(.failure(TransferEngineError.fileAccessError("Cannot open file: \(fileURL.path)")))
+                        let err = NearsideError(
+                            code: .storageReadFailed,
+                            operation: "executeAttempt",
+                            message: "Cannot open file: \(fileURL.lastPathComponent)",
+                            correlationId: transferId
+                        )
+                        NearsideLogger.shared.error(err, state: "failed")
+                        completion(.failure(err))
                         return
                     }
                     handles.append(h)
@@ -227,11 +273,30 @@ public final class TransferEngine: @unchecked Sendable {
 
                     if attempt < retryPolicy.maxAttempts {
                         let delay = retryPolicy.delay(forAttempt: attempt)
+                        NearsideLogger.shared.warn(
+                            "transfer",
+                            "executeAttempt",
+                            "Outbound attempt \(attempt) failed, scheduling retry in \(String(format: "%.2f", delay))s",
+                            state: "retrying",
+                            correlationId: transferId,
+                            retryCount: attempt,
+                            underlyingError: error,
+                            metadata: ["delaySeconds": "\(delay)"]
+                        )
                         self.queue.asyncAfter(deadline: .now() + delay) {
                             executeAttempt(attempt: attempt + 1)
                         }
                     } else {
-                        completion(.failure(error))
+                        let finalErr = NearsideError(
+                            code: .transferRetryExhausted,
+                            operation: "executeAttempt",
+                            message: "Outbound transfer exhausted all \(retryPolicy.maxAttempts) attempts",
+                            underlyingError: error,
+                            correlationId: transferId,
+                            retryCount: attempt
+                        )
+                        NearsideLogger.shared.error(finalErr, state: "failed")
+                        completion(.failure(finalErr))
                     }
                 }
 
@@ -239,6 +304,13 @@ public final class TransferEngine: @unchecked Sendable {
                     guard let self = self else { return }
                     switch state {
                     case .ready:
+                        NearsideLogger.shared.info(
+                            "connection",
+                            "stateUpdate",
+                            "TCP connection ready, streaming chunks",
+                            state: "transferring",
+                            correlationId: transferId
+                        )
                         self.performOutboundStream(
                             connection: connection,
                             manifest: manifest,
@@ -256,6 +328,14 @@ public final class TransferEngine: @unchecked Sendable {
                                     var finalRecord = recordTemplate
                                     finalRecord.progress = 1.0
                                     finalRecord.status = .completed
+                                    NearsideLogger.shared.info(
+                                        "transfer",
+                                        "performOutboundStream",
+                                        "Outbound transfer completed successfully",
+                                        state: "completed",
+                                        correlationId: transferId,
+                                        metadata: ["totalBytes": "\(manifest.totalBytes)"]
+                                    )
                                     completion(.success(finalRecord))
                                 case .failure(let err):
                                     handleAttemptFailure(error: err)
@@ -446,28 +526,57 @@ public final class TransferEngine: @unchecked Sendable {
         onProgress: @escaping (Double, TransferRecord) -> Void,
         onComplete: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
+        let connectionId = "conn_\(UUID().uuidString.prefix(8).lowercased())"
+        NearsideLogger.shared.info(
+            "connection",
+            "handleInboundConnection",
+            "Inbound TCP connection accepted",
+            state: "connecting",
+            correlationId: connectionId
+        )
+
         connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { [weak self] headerData, _, _, error in
             guard let self = self else { return }
             if let error = error {
-                onComplete(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                let err = NearsideError(code: .connectionClosed, operation: "readHeader", message: error.localizedDescription, underlyingError: error, correlationId: connectionId)
+                NearsideLogger.shared.error(err, state: "failed")
+                onComplete(.failure(err))
                 return
             }
             guard let data = headerData, data.count == 9 else {
-                onComplete(.failure(TransferEngineError.connectionFailed("Invalid manifest header")))
+                let err = NearsideError(code: .protocolMagicMismatch, operation: "readHeader", message: "Invalid manifest header length", correlationId: connectionId)
+                NearsideLogger.shared.error(err, state: "failed")
+                onComplete(.failure(err))
                 return
             }
 
             let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, manError in
                 if let manError = manError {
-                    onComplete(.failure(TransferEngineError.connectionFailed(manError.localizedDescription)))
+                    let err = NearsideError(code: .connectionClosed, operation: "readManifest", message: manError.localizedDescription, underlyingError: manError, correlationId: connectionId)
+                    NearsideLogger.shared.error(err, state: "failed")
+                    onComplete(.failure(err))
                     return
                 }
                 guard let payload = payloadData,
                       let manifest = try? JSONDecoder().decode(TransferManifest.self, from: payload) else {
-                    onComplete(.failure(TransferEngineError.manifestRejected("Invalid manifest JSON")))
+                    let err = NearsideError(code: .protocolDecodeFailed, operation: "decodeManifest", message: "Invalid manifest JSON", correlationId: connectionId)
+                    NearsideLogger.shared.error(err, state: "failed")
+                    onComplete(.failure(err))
                     return
                 }
+
+                NearsideLogger.shared.info(
+                    "transfer",
+                    "handleInboundConnection",
+                    "Received transfer manifest for \(manifest.itemCount) item(s)",
+                    state: "negotiating",
+                    correlationId: manifest.transferId,
+                    metadata: [
+                        "totalBytes": "\(manifest.totalBytes)",
+                        "sender": NearsideRedactor.sanitizeIdentity(manifest.senderId)
+                    ]
+                )
 
                 // Strict path traversal defense
                 for item in manifest.items {
@@ -478,15 +587,29 @@ public final class TransferEngine: @unchecked Sendable {
                           cleanName == item.name,
                           !item.name.contains("/"),
                           !item.name.contains("\\") else {
+                        let err = NearsideError(
+                            code: .protocolPathTraversalRejected,
+                            operation: "validateManifest",
+                            message: "Potential path traversal in item name: \(cleanName)",
+                            correlationId: manifest.transferId
+                        )
+                        NearsideLogger.shared.error(err, state: "rejected")
                         self.sendError(connection: connection, code: 400, reason: "INVALID_FILENAME", detail: "Potential path traversal in item name")
-                        onComplete(.failure(TransferEngineError.manifestRejected("Invalid filename: \(item.name)")))
+                        onComplete(.failure(err))
                         return
                     }
                 }
 
                 guard trustStore.isEnrolled(identity: manifest.senderId) else {
+                    let err = NearsideError(
+                        code: .trustUntrustedPeer,
+                        operation: "verifyTrust",
+                        message: "Sender \(NearsideRedactor.sanitizeIdentity(manifest.senderId)) is not enrolled in trust store",
+                        correlationId: manifest.transferId
+                    )
+                    NearsideLogger.shared.error(err, state: "rejected")
                     self.sendError(connection: connection, code: 403, reason: "DEVICE_NOT_PAIRED", detail: "Sender \(manifest.senderId) is not trusted.")
-                    onComplete(.failure(TransferEngineError.untrustedPeer(manifest.senderId)))
+                    onComplete(.failure(err))
                     return
                 }
 
@@ -676,19 +799,36 @@ public final class TransferEngine: @unchecked Sendable {
                         if let hasher = itemHashers[item.index] {
                             let calculated = hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
                             if calculated != item.sha256 {
-                                onComplete(.failure(TransferEngineError.integrityMismatch(item.name)))
+                                let err = NearsideError(
+                                    code: .verifyFileChecksumMismatch,
+                                    operation: "receiveInboundChunks",
+                                    message: "File checksum mismatch for \(item.name)",
+                                    correlationId: manifest.transferId
+                                )
+                                NearsideLogger.shared.error(err, state: "failed")
+                                onComplete(.failure(err))
                                 return
                             }
                         }
                     }
                     finalizeRecord()
+                    NearsideLogger.shared.info(
+                        "transfer",
+                        "receiveInboundChunks",
+                        "Inbound transfer completed and verified successfully",
+                        state: "completed",
+                        correlationId: manifest.transferId,
+                        metadata: ["totalBytes": "\(manifest.totalBytes)"]
+                    )
                     onComplete(.success(currentRecord))
                     return
                 }
 
                 guard frameType == FrameType.chunk.rawValue else {
                     closeHandles()
-                    onComplete(.failure(TransferEngineError.connectionFailed("Unexpected frame type \(frameType)")))
+                    let err = NearsideError(code: .protocolInvalidFrameType, operation: "receiveInboundChunks", message: "Unexpected frame type \(frameType)", correlationId: manifest.transferId)
+                    NearsideLogger.shared.error(err, state: "failed")
+                    onComplete(.failure(err))
                     return
                 }
 
@@ -698,12 +838,16 @@ public final class TransferEngine: @unchecked Sendable {
                 connection.receive(minimumIncompleteLength: remainingExpected, maximumLength: remainingExpected) { restData, _, _, restErr in
                     if let restErr = restErr {
                         closeHandles()
-                        onComplete(.failure(TransferEngineError.connectionFailed(restErr.localizedDescription)))
+                        let err = NearsideError(code: .connectionClosed, operation: "receiveChunk", message: restErr.localizedDescription, underlyingError: restErr, correlationId: manifest.transferId)
+                        NearsideLogger.shared.error(err, state: "failed")
+                        onComplete(.failure(err))
                         return
                     }
                     guard let r = restData, r.count == remainingExpected else {
                         closeHandles()
-                        onComplete(.failure(TransferEngineError.connectionFailed("Incomplete chunk data")))
+                        let err = NearsideError(code: .connectionClosed, operation: "receiveChunk", message: "Incomplete chunk data", correlationId: manifest.transferId)
+                        NearsideLogger.shared.error(err, state: "failed")
+                        onComplete(.failure(err))
                         return
                     }
 
@@ -715,7 +859,14 @@ public final class TransferEngine: @unchecked Sendable {
                     let computedHash = Data(SHA256.hash(data: chunkPayload))
                     guard computedHash == presentedHash else {
                         closeHandles()
-                        onComplete(.failure(TransferEngineError.integrityMismatch("Chunk integrity failure")))
+                        let err = NearsideError(
+                            code: .verifyChunkMismatch,
+                            operation: "receiveInboundChunks",
+                            message: "Chunk hash mismatch at offset \(offset)",
+                            correlationId: manifest.transferId
+                        )
+                        NearsideLogger.shared.error(err, state: "failed")
+                        onComplete(.failure(err))
                         return
                     }
 

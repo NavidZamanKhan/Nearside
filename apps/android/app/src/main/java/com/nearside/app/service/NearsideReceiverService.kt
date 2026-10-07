@@ -13,6 +13,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.nearside.app.R
 import com.nearside.app.crypto.PinnedTrustStore
+import com.nearside.app.diagnostics.*
 import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.transfer.TransferEngine
@@ -120,6 +121,12 @@ class NearsideReceiverService : Service() {
         try {
             val socket = ServerSocket(41433)
             serverSocket = socket
+            NearsideLogger.info(
+                subsystem = "connection",
+                operation = "startTcpListener",
+                message = "TCP ServerSocket bound to port 41433",
+                state = "listening"
+            )
             serviceScope.launch {
                 val trustStore = PinnedTrustStore(this@NearsideReceiverService)
                 val destDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
@@ -157,19 +164,38 @@ class NearsideReceiverService : Service() {
                             }
                         }
                     } catch (e: Exception) {
+                        if (!socket.isClosed) {
+                            NearsideLogger.warn(
+                                subsystem = "connection",
+                                operation = "acceptLoop",
+                                message = "Socket accept interrupted or failed",
+                                underlyingError = e
+                            )
+                        }
                         break
                     }
                 }
             }
         } catch (e: Exception) {
-            // Port already in use or test mode
+            NearsideLogger.error(
+                NearsideError(
+                    code = NearsideErrorCode.CONNECTION_BIND_FAILED,
+                    operation = "startTcpListener",
+                    message = "Failed to bind TCP ServerSocket to port 41433: ${e.message}",
+                    underlyingError = e
+                ),
+                state = "failed"
+            )
         }
     }
 
     private fun stopTcpListener() {
         try {
             serverSocket?.close()
-        } catch (ignored: Exception) {}
+            NearsideLogger.debug("connection", "stopTcpListener", "Closed TCP ServerSocket")
+        } catch (e: Exception) {
+            NearsideLogger.warn("connection", "stopTcpListener", "Error closing ServerSocket", underlyingError = e)
+        }
         serverSocket = null
     }
 

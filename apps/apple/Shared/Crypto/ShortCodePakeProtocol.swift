@@ -154,4 +154,15 @@ public enum PakeError: Error, Equatable {
     case sessionExpired
     case maxAttemptsExceeded
     case tagMismatch(attemptsRemaining: Int)
+
+    public func toNearsideError(correlationId: String? = nil) -> NearsideError {
+        switch self {
+        case .sessionExpired:
+            return NearsideError(code: .pairingSessionExpired, operation: "verifyPake", message: "PAKE session expired", correlationId: correlationId)
+        case .maxAttemptsExceeded:
+            return NearsideError(code: .pairingRateLimitExceeded, operation: "verifyPake", message: "PAKE max attempts exceeded, lockout active", correlationId: correlationId)
+        case .tagMismatch(let remaining):
+            return NearsideError(code: .pairingVerificationFailed, operation: "verifyPake", message: "PAKE verification tag mismatch (\(remaining) attempts remaining)", correlationId: correlationId)
+        }
+    }
 }

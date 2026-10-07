@@ -30,6 +30,7 @@ fi
 # 3. Run macOS Milestone 2 Test Suite
 echo "[3/6] Running macOS Milestone 2 Discovery & Crypto Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \

@@ -172,9 +172,14 @@ public final class AppState: ObservableObject {
                                 self.latestReceivedText = finished.payloadText
                                 self.clipboardToastMessage = (finished.payloadType == .url) ? "Received link copied to clipboard" : "Received text copied to clipboard"
                             }
-                        case .failure:
+                        case .failure(let error):
+                            let nsErr = (error as? NearsideError) ?? (error as? TransferEngineError)?.toNearsideError(operation: "handleInboundConnection") ?? NearsideError(code: .transferInterrupted, operation: "handleInboundConnection", message: error.localizedDescription, underlyingError: error)
+                            NearsideLogger.shared.error(nsErr, state: "failed")
                             if var failed = self.activeTransfer {
                                 failed.status = .failed
+                                failed.errorCode = nsErr.code.rawValue
+                                failed.errorMessage = nsErr.message
+                                failed.correlationId = failed.id
                                 self.transferHistory.insert(failed, at: 0)
                             }
                             self.activeTransfer = nil
@@ -272,9 +277,14 @@ public final class AppState: ObservableObject {
                         case .success(let finished):
                             self?.transferHistory.insert(finished, at: 0)
                             self?.activeTransfer = nil
-                        case .failure:
+                        case .failure(let error):
+                            let nsErr = (error as? NearsideError) ?? (error as? TransferEngineError)?.toNearsideError(operation: "sendFiles") ?? NearsideError(code: .transferInterrupted, operation: "sendFiles", message: error.localizedDescription, underlyingError: error)
+                            NearsideLogger.shared.error(nsErr, state: "failed")
                             if var failed = self?.activeTransfer {
                                 failed.status = .failed
+                                failed.errorCode = nsErr.code.rawValue
+                                failed.errorMessage = nsErr.message
+                                failed.correlationId = failed.id
                                 self?.transferHistory.insert(failed, at: 0)
                             }
                             self?.activeTransfer = nil

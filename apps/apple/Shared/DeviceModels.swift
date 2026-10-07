@@ -105,6 +105,9 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
     public let timestamp: Date
     public var payloadType: PayloadType
     public var payloadText: String?
+    public var errorCode: String?
+    public var errorMessage: String?
+    public var correlationId: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -118,7 +121,10 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
         status: TransferStatus = .completed,
         timestamp: Date = Date(),
         payloadType: PayloadType = .file,
-        payloadText: String? = nil
+        payloadText: String? = nil,
+        errorCode: String? = nil,
+        errorMessage: String? = nil,
+        correlationId: String? = nil
     ) {
         self.id = id
         self.deviceName = deviceName
@@ -132,6 +138,9 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
         self.timestamp = timestamp
         self.payloadType = payloadType
         self.payloadText = payloadText
+        self.errorCode = errorCode
+        self.errorMessage = errorMessage
+        self.correlationId = correlationId
     }
 
     public var formattedSize: String {

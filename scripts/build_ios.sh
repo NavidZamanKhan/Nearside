@@ -21,6 +21,7 @@ xcrun swiftc -O -emit-executable \
     -sdk "$SDK_PATH" \
     -target "$TARGET" \
     -Xlinker -e -Xlinker _NSExtensionMain \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
@@ -39,6 +40,7 @@ echo "[2/4] Compiling iOS Host Application..."
 xcrun swiftc -O -emit-executable \
     -sdk "$SDK_PATH" \
     -target "$TARGET" \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \

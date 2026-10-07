@@ -30,6 +30,7 @@ fi
 # 3. Run macOS Milestone 2 Test Suite
 echo "[3/7] Running macOS Milestone 2 Discovery & Crypto Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
@@ -44,6 +45,7 @@ echo "  -> Verified: macOS Milestone 2 test suite (28 assertions passed)."
 # 4. Run macOS Milestone 3 Test Suite
 echo "[4/7] Running macOS Milestone 3 Transfer Engine Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \

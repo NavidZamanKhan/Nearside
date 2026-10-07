@@ -64,7 +64,10 @@ data class TransferRecord(
     val status: TransferStatus = TransferStatus.COMPLETED,
     val timestamp: Long = System.currentTimeMillis(),
     val payloadType: PayloadType = PayloadType.FILE,
-    val payloadText: String? = null
+    val payloadText: String? = null,
+    val errorCode: String? = null,
+    val errorMessage: String? = null,
+    val correlationId: String? = null
 ) {
     val formattedSize: String
         get() {

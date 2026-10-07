@@ -1,6 +1,7 @@
 package com.nearside.app.transfer
 
 import com.nearside.app.crypto.PinnedTrustStore
+import com.nearside.app.diagnostics.*
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
@@ -139,8 +140,27 @@ object TransferEngine {
         val manifest = buildManifest(files, senderId)
         var lastException: Exception? = null
 
+        NearsideLogger.info(
+            subsystem = "transfer",
+            operation = "sendFiles",
+            message = "Starting outbound transfer with ${files.size} file(s)",
+            state = "starting",
+            correlationId = manifest.transferId,
+            metadata = mapOf(
+                "totalBytes" to "${manifest.totalBytes}",
+                "destination" to "$host:$port"
+            )
+        )
+
         for (attempt in 1..retryPolicy.maxAttempts) {
             try {
+                NearsideLogger.debug(
+                    subsystem = "transfer",
+                    operation = "performSendAttempt",
+                    message = "Beginning connection attempt $attempt/${retryPolicy.maxAttempts}",
+                    state = "connecting",
+                    correlationId = manifest.transferId
+                )
                 return@withContext performSendAttempt(
                     files = files,
                     manifest = manifest,
@@ -151,11 +171,30 @@ object TransferEngine {
             } catch (e: Exception) {
                 lastException = e
                 if (attempt < retryPolicy.maxAttempts) {
-                    delay(retryPolicy.delayMs(attempt))
+                    val delay = retryPolicy.delayMs(attempt)
+                    NearsideLogger.warn(
+                        subsystem = "transfer",
+                        operation = "performSendAttempt",
+                        message = "Attempt $attempt failed, scheduling retry in ${delay}ms",
+                        state = "retrying",
+                        correlationId = manifest.transferId,
+                        retryCount = attempt,
+                        underlyingError = e
+                    )
+                    delay(delay)
                 }
             }
         }
-        Result.failure(lastException ?: IllegalStateException("Failed to send files after ${retryPolicy.maxAttempts} attempts"))
+        val finalErr = NearsideError(
+            code = NearsideErrorCode.TRANSFER_RETRY_EXHAUSTED,
+            operation = "sendFiles",
+            message = "Outbound transfer exhausted all ${retryPolicy.maxAttempts} attempts",
+            underlyingError = lastException,
+            correlationId = manifest.transferId,
+            retryCount = retryPolicy.maxAttempts
+        )
+        NearsideLogger.error(finalErr, state = "failed")
+        Result.failure(finalErr)
     }
 
     private fun performSendAttempt(
@@ -171,6 +210,14 @@ object TransferEngine {
             val out = DataOutputStream(socket.getOutputStream())
             val input = DataInputStream(socket.getInputStream())
 
+            NearsideLogger.info(
+                subsystem = "connection",
+                operation = "performSendAttempt",
+                message = "TCP socket connected to $host:$port",
+                state = "transferring",
+                correlationId = manifest.transferId
+            )
+
             val manifestJson = manifest.toJson().toString().toByteArray(Charsets.UTF_8)
             val mHeader = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
             mHeader.putInt(TransferChunk.MAGIC)
@@ -183,11 +230,15 @@ object TransferEngine {
             // Read ACK
             val ackMagic = input.readInt()
             if (ackMagic != TransferChunk.MAGIC) {
-                return Result.failure(IllegalStateException("Invalid magic in ACK"))
+                val err = NearsideError(NearsideErrorCode.PROTOCOL_MAGIC_MISMATCH, "performSendAttempt", "Invalid magic in ACK", correlationId = manifest.transferId)
+                NearsideLogger.error(err, state = "failed")
+                return Result.failure(err)
             }
             val ackType = input.readByte()
             if (ackType != FrameType.ACK.code) {
-                return Result.failure(IllegalStateException("Unexpected response type $ackType"))
+                val err = NearsideError(NearsideErrorCode.PROTOCOL_INVALID_FRAME_TYPE, "performSendAttempt", "Unexpected response type $ackType", correlationId = manifest.transferId)
+                NearsideLogger.error(err, state = "failed")
+                return Result.failure(err)
             }
             val ackLen = input.readInt()
             val ackPayload = ByteArray(ackLen)
@@ -196,7 +247,9 @@ object TransferEngine {
             val ackJson = JSONObject(String(ackPayload, Charsets.UTF_8))
             val ack = TransferAck.fromJson(ackJson)
             if (ack.status != "ACCEPTED") {
-                return Result.failure(IllegalStateException("Transfer rejected: ${ack.status}"))
+                val err = NearsideError(NearsideErrorCode.TRANSFER_REJECTED, "performSendAttempt", "Transfer rejected: ${ack.status}", correlationId = manifest.transferId)
+                NearsideLogger.error(err, state = "rejected")
+                return Result.failure(err)
             }
 
             var remainingResume = ack.bytesReceived
@@ -257,6 +310,14 @@ object TransferEngine {
             out.flush()
 
             onProgress(1.0f, totalBytes, totalBytes)
+            NearsideLogger.info(
+                subsystem = "transfer",
+                operation = "performSendAttempt",
+                message = "Outbound transfer completed successfully",
+                state = "completed",
+                correlationId = manifest.transferId,
+                metadata = mapOf("totalBytes" to "$totalBytes")
+            )
             return Result.success(manifest)
         }
     }
@@ -267,6 +328,14 @@ object TransferEngine {
         destinationDir: File,
         onProgress: (Float, TransferRecord) -> Unit
     ): Result<TransferRecord> = withContext(Dispatchers.IO) {
+        val connectionId = "conn_${UUID.randomUUID().toString().take(8).lowercase()}"
+        NearsideLogger.info(
+            subsystem = "connection",
+            operation = "handleInboundConnection",
+            message = "Inbound TCP connection accepted",
+            state = "connecting",
+            correlationId = connectionId
+        )
         try {
             socket.tcpNoDelay = true
             socket.soTimeout = 15000
@@ -275,11 +344,15 @@ object TransferEngine {
 
             val magic = input.readInt()
             if (magic != TransferChunk.MAGIC) {
-                return@withContext Result.failure(IllegalStateException("Invalid stream magic"))
+                val err = NearsideError(NearsideErrorCode.PROTOCOL_MAGIC_MISMATCH, "handleInboundConnection", "Invalid stream magic", correlationId = connectionId)
+                NearsideLogger.error(err, state = "failed")
+                return@withContext Result.failure(err)
             }
             val frameType = input.readByte()
             if (frameType != FrameType.MANIFEST.code) {
-                return@withContext Result.failure(IllegalStateException("Expected manifest frame, got $frameType"))
+                val err = NearsideError(NearsideErrorCode.PROTOCOL_INVALID_FRAME_TYPE, "handleInboundConnection", "Expected manifest frame, got $frameType", correlationId = connectionId)
+                NearsideLogger.error(err, state = "failed")
+                return@withContext Result.failure(err)
             }
 
             val len = input.readInt()
@@ -288,6 +361,18 @@ object TransferEngine {
 
             val manifestObj = JSONObject(String(manifestBytes, Charsets.UTF_8))
             val manifest = TransferManifest.fromJson(manifestObj)
+
+            NearsideLogger.info(
+                subsystem = "transfer",
+                operation = "handleInboundConnection",
+                message = "Received transfer manifest for ${manifest.itemCount} item(s)",
+                state = "transferring",
+                correlationId = manifest.transferId,
+                metadata = mapOf(
+                    "totalBytes" to "${manifest.totalBytes}",
+                    "sender" to NearsideRedactor.sanitizeIdentity(manifest.senderId)
+                )
+            )
 
             // Strict path traversal defense
             for (item in manifest.items) {
@@ -302,7 +387,9 @@ object TransferEngine {
                     out.write(errH.array())
                     out.write(errBytes)
                     out.flush()
-                    return@withContext Result.failure(SecurityException("Potential path traversal in item name: ${item.name}"))
+                    val nsErr = NearsideError(NearsideErrorCode.PROTOCOL_PATH_TRAVERSAL_REJECTED, "validateManifest", "Potential path traversal in item name: ${item.name}", correlationId = manifest.transferId)
+                    NearsideLogger.error(nsErr, state = "rejected")
+                    return@withContext Result.failure(nsErr)
                 }
             }
 
@@ -317,7 +404,9 @@ object TransferEngine {
                 out.write(errH.array())
                 out.write(errBytes)
                 out.flush()
-                return@withContext Result.failure(SecurityException("Untrusted sender: ${manifest.senderId}"))
+                val nsErr = NearsideError(NearsideErrorCode.TRUST_UNTRUSTED_PEER, "verifyTrust", "Untrusted sender: ${NearsideRedactor.sanitizeIdentity(manifest.senderId)}", correlationId = manifest.transferId)
+                NearsideLogger.error(nsErr, state = "rejected")
+                return@withContext Result.failure(nsErr)
             }
 
             var totalResumed = 0L
@@ -441,7 +530,9 @@ object TransferEngine {
                     }
 
                     if (cType != FrameType.CHUNK.code) {
-                        return@withContext Result.failure(IllegalStateException("Unexpected frame type: $cType"))
+                        val err = NearsideError(NearsideErrorCode.PROTOCOL_INVALID_FRAME_TYPE, "receiveInboundChunks", "Unexpected frame type: $cType", correlationId = manifest.transferId)
+                        NearsideLogger.error(err, state = "failed")
+                        return@withContext Result.failure(err)
                     }
 
                     val payloadLen = input.readInt()
@@ -456,7 +547,9 @@ object TransferEngine {
 
                     val computedHash = MessageDigest.getInstance("SHA-256").digest(payload)
                     if (!computedHash.contentEquals(presentedHash)) {
-                        return@withContext Result.failure(SecurityException("Chunk hash mismatch"))
+                        val err = NearsideError(NearsideErrorCode.VERIFY_CHUNK_MISMATCH, "receiveInboundChunks", "Chunk hash mismatch at offset $offset", correlationId = manifest.transferId)
+                        NearsideLogger.error(err, state = "failed")
+                        return@withContext Result.failure(err)
                     }
 
                     val fos = fileOutputs[itemIndex] ?: throw IllegalStateException("Unknown item index $itemIndex")
@@ -474,7 +567,9 @@ object TransferEngine {
                     val digest = fileDigests[item.index]?.digest() ?: continue
                     val calculatedHex = digest.joinToString("") { "%02x".format(it) }
                     if (calculatedHex != item.sha256) {
-                        return@withContext Result.failure(SecurityException("File checksum mismatch for ${item.name}"))
+                        val err = NearsideError(NearsideErrorCode.VERIFY_FILE_CHECKSUM_MISMATCH, "receiveInboundChunks", "File checksum mismatch for ${item.name}", correlationId = manifest.transferId)
+                        NearsideLogger.error(err, state = "failed")
+                        return@withContext Result.failure(err)
                     }
                 }
 
@@ -501,12 +596,22 @@ object TransferEngine {
                     payloadText = payloadText
                 )
                 onProgress(1.0f, record)
+                NearsideLogger.info(
+                    subsystem = "transfer",
+                    operation = "receiveInboundChunks",
+                    message = "Inbound transfer completed and verified successfully",
+                    state = "completed",
+                    correlationId = manifest.transferId,
+                    metadata = mapOf("totalBytes" to "${manifest.totalBytes}")
+                )
                 Result.success(record)
             } finally {
                 fileOutputs.values.forEach { try { it.close() } catch (ignored: Exception) {} }
             }
         } catch (e: Exception) {
-            Result.failure(e)
+            val err = (e as? NearsideError) ?: NearsideError(NearsideErrorCode.TRANSFER_INTERRUPTED, "handleInboundConnection", e.message ?: "Transfer error", underlyingError = e, correlationId = connectionId)
+            NearsideLogger.error(err, state = "failed")
+            Result.failure(err)
         }
     }
 }

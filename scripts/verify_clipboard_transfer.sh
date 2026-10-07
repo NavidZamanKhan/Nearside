@@ -40,6 +40,7 @@ fi
 # 4. Run Swift Clipboard & Content Sharing Test Suite
 echo "[4/6] Running Swift Clipboard & Content Sharing Suite..."
 xcrun swiftc -O \
+    apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \

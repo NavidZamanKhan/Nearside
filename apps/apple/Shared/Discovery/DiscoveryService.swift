@@ -78,9 +78,11 @@ public final class DiscoveryService: @unchecked Sendable {
                 case .ready:
                     if let actualPort = newListener.port?.rawValue {
                         self.boundPort = actualPort
+                        NearsideLogger.shared.info("discovery", "setupListener", "Discovery listener bound to port \(actualPort)", state: "advertising")
                     }
                 case .failed(let error):
-                    print("DiscoveryService listener failed: \(error)")
+                    let err = NearsideError(code: .discoveryRegistrationFailed, operation: "setupListener", message: "Discovery listener failed", underlyingError: error)
+                    NearsideLogger.shared.error(err, state: "failed")
                 default:
                     break
                 }
@@ -100,7 +102,8 @@ public final class DiscoveryService: @unchecked Sendable {
 
             newListener.start(queue: queue)
         } catch {
-            print("Failed to create NWListener: \(error)")
+            let err = NearsideError(code: .discoveryRegistrationFailed, operation: "setupListener", message: "Failed to create NWListener", underlyingError: error)
+            NearsideLogger.shared.error(err, state: "failed")
         }
     }
 
@@ -148,8 +151,11 @@ public final class DiscoveryService: @unchecked Sendable {
 
         newBrowser.stateUpdateHandler = { state in
             switch state {
+            case .ready:
+                NearsideLogger.shared.info("discovery", "setupBrowser", "mDNS browser ready for _nearside._tcp", state: "browsing")
             case .failed(let error):
-                print("DiscoveryService browser failed: \(error)")
+                let err = NearsideError(code: .discoveryBrowserFailed, operation: "setupBrowser", message: "Discovery browser failed", underlyingError: error)
+                NearsideLogger.shared.error(err, state: "failed")
             default:
                 break
             }
