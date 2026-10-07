@@ -13,6 +13,8 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.nearside.app.R
 import com.nearside.app.crypto.PinnedTrustStore
+import com.nearside.app.model.PayloadType
+import com.nearside.app.model.TransferRecord
 import com.nearside.app.transfer.TransferEngine
 import com.nearside.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -134,7 +136,7 @@ class NearsideReceiverService : Service() {
                             val transferTag = "rx_${UUID.randomUUID().toString().take(8)}"
                             powerLockManager.acquire(transferTag)
                             try {
-                                TransferEngine.handleInboundConnection(
+                                val result = TransferEngine.handleInboundConnection(
                                     socket = client,
                                     trustStore = trustStore,
                                     destinationDir = destDir,
@@ -142,6 +144,11 @@ class NearsideReceiverService : Service() {
                                         updateTransferProgressNotification(record.filename, progress)
                                     }
                                 )
+                                result.onSuccess { record ->
+                                    if (record.payloadText != null) {
+                                        handleReceivedTextPayload(record)
+                                    }
+                                }
                             } finally {
                                 powerLockManager.release(transferTag)
                                 if (powerLockManager.activeCount == 0) {
@@ -217,6 +224,38 @@ class NearsideReceiverService : Service() {
 
         val manager = getSystemService(NotificationManager::class.java)
         manager?.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun handleReceivedTextPayload(record: TransferRecord) {
+        val text = record.payloadText ?: return
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val clip = android.content.ClipData.newPlainText("Nearside Shared Content", text)
+        clipboard?.setPrimaryClip(clip)
+
+        val manager = getSystemService(NotificationManager::class.java)
+        val notifBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_nearside)
+            .setContentTitle(if (record.payloadType == PayloadType.URL) "Link Copied to Clipboard" else "Text Copied to Clipboard")
+            .setContentText(if (text.length > 50) text.take(50) + "..." else text)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+
+        if (record.payloadType == PayloadType.URL) {
+            try {
+                val openIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(text)).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                val pi = PendingIntent.getActivity(
+                    this,
+                    UUID.randomUUID().hashCode(),
+                    openIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                notifBuilder.addAction(0, "Open Link", pi)
+            } catch (ignored: Exception) {}
+        }
+
+        manager?.notify(NOTIFICATION_ID + 1, notifBuilder.build())
     }
 
     private fun buildNotification(isPaused: Boolean): Notification {

@@ -47,6 +47,26 @@ public struct TransferManifest: Codable, Equatable {
         self.itemCount = items.count
         self.totalBytes = items.reduce(0) { $0 + $1.size }
     }
+
+    public static func buildTextManifest(text: String, isURL: Bool = false, senderId: String) -> (manifest: TransferManifest, data: Data) {
+        let data = Data(text.utf8)
+        let hash = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+        let mimeType = isURL ? "text/uri-list" : "text/plain"
+        let name = isURL ? "link.url" : "clipboard.txt"
+        let item = TransferItemManifest(
+            index: 0,
+            name: name,
+            mimeType: mimeType,
+            size: Int64(data.count),
+            sha256: hash
+        )
+        let manifest = TransferManifest(
+            transferId: "tx_\(UUID().uuidString.prefix(12).lowercased())",
+            senderId: senderId,
+            items: [item]
+        )
+        return (manifest, data)
+    }
 }
 
 public struct TransferAck: Codable, Equatable {

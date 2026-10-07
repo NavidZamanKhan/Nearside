@@ -2,6 +2,9 @@ import Foundation
 import Combine
 import SwiftUI
 import CryptoKit
+#if canImport(AppKit)
+import AppKit
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -22,6 +25,8 @@ public final class AppState: ObservableObject {
     @Published public var discoveredDevices: [NearsideDevice] = []
     @Published public var transferHistory: [TransferRecord] = []
     @Published public var activeTransfer: TransferRecord?
+    @Published public var latestReceivedText: String?
+    @Published public var clipboardToastMessage: String?
 
     public init() {
         let identity = DeviceIdentity.loadOrCreateDefault()
@@ -145,6 +150,38 @@ public final class AppState: ObservableObject {
             if !devices.isEmpty {
                 self.discoveredDevices = devices
             }
+        }
+        service.onInboundConnection = { [weak self] connection in
+            guard let self = self else { return }
+            TransferEngine.shared.handleInboundConnection(
+                connection: connection,
+                trustStore: self.trustStore,
+                destinationFolder: self.downloadsFolderURL,
+                onProgress: { fraction, record in
+                    Task { @MainActor in
+                        self.activeTransfer = record
+                    }
+                },
+                onComplete: { result in
+                    Task { @MainActor in
+                        switch result {
+                        case .success(let finished):
+                            self.transferHistory.insert(finished, at: 0)
+                            self.activeTransfer = nil
+                            if finished.payloadType == .text || finished.payloadType == .url {
+                                self.latestReceivedText = finished.payloadText
+                                self.clipboardToastMessage = (finished.payloadType == .url) ? "Received link copied to clipboard" : "Received text copied to clipboard"
+                            }
+                        case .failure:
+                            if var failed = self.activeTransfer {
+                                failed.status = .failed
+                                self.transferHistory.insert(failed, at: 0)
+                            }
+                            self.activeTransfer = nil
+                        }
+                    }
+                }
+            )
         }
         service.startAdvertising(
             identity: deviceIdentity.publicIdentity,
@@ -282,6 +319,75 @@ public final class AppState: ObservableObject {
                 }
                 self.activeTransfer = nil
             }
+        }
+    }
+
+    public func sendClipboard(to device: NearsideDevice) {
+        let text: String?
+        #if os(macOS)
+        text = NSPasteboard.general.string(forType: .string)
+        #elseif os(iOS)
+        text = UIPasteboard.general.string
+        #else
+        text = nil
+        #endif
+
+        guard let payload = text, !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            self.clipboardToastMessage = "Clipboard is empty"
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                self.clipboardToastMessage = nil
+            }
+            return
+        }
+
+        let isURL = payload.hasPrefix("http://") || payload.hasPrefix("https://")
+        let displayFilename = isURL ? payload : (payload.count > 25 ? String(payload.prefix(25)) + "..." : payload)
+
+        let record = TransferRecord(
+            deviceName: device.name,
+            devicePlatform: device.platform,
+            direction: .outgoing,
+            filename: displayFilename,
+            fileCount: 1,
+            totalSizeBytes: Int64(payload.utf8.count),
+            progress: 0.05,
+            status: .transferring,
+            timestamp: Date(),
+            payloadType: isURL ? .url : .text,
+            payloadText: payload
+        )
+        self.activeTransfer = record
+
+        if let ip = device.ipAddress, !ip.isEmpty {
+            TransferEngine.shared.sendText(
+                text: payload,
+                isURL: isURL,
+                to: device,
+                senderId: localFingerprint,
+                onProgress: { [weak self] fraction, transferred, total in
+                    Task { @MainActor in
+                        self?.activeTransfer?.progress = fraction
+                    }
+                },
+                completion: { [weak self] result in
+                    Task { @MainActor in
+                        switch result {
+                        case .success(let finished):
+                            self?.transferHistory.insert(finished, at: 0)
+                            self?.activeTransfer = nil
+                        case .failure:
+                            if var failed = self?.activeTransfer {
+                                failed.status = .failed
+                                self?.transferHistory.insert(failed, at: 0)
+                            }
+                            self?.activeTransfer = nil
+                        }
+                    }
+                }
+            )
+        } else {
+            simulateOutgoingTransfer(to: device, filenames: [displayFilename], totalBytes: Int64(payload.utf8.count))
         }
     }
 }

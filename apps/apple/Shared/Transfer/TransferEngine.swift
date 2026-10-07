@@ -1,6 +1,11 @@
 import Foundation
 import Network
 import CryptoKit
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 public enum TransferEngineError: Error, LocalizedError {
     case connectionFailed(String)
@@ -67,11 +72,21 @@ public final class TransferEngine: @unchecked Sendable {
             }
             try handle.seek(toOffset: 0)
 
+            let ext = fileURL.pathExtension.lowercased()
+            let mimeType: String
+            if ext == "txt" || ext == "md" || ext == "json" {
+                mimeType = "text/plain"
+            } else if ext == "url" {
+                mimeType = "text/uri-list"
+            } else {
+                mimeType = "application/octet-stream"
+            }
+
             let shaHex = hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
             let item = TransferItemManifest(
                 index: index,
                 name: fileURL.lastPathComponent,
-                mimeType: "application/octet-stream",
+                mimeType: mimeType,
                 size: fileSize,
                 sha256: shaHex
             )
@@ -84,6 +99,47 @@ public final class TransferEngine: @unchecked Sendable {
             items: items
         )
         return (manifest, handles)
+    }
+
+    public func sendText(
+        text: String,
+        isURL: Bool = false,
+        to device: NearsideDevice,
+        senderId: String,
+        retryPolicy: RetryPolicy = .default,
+        onProgress: @escaping (Double, Int64, Int64) -> Void,
+        completion: @escaping (Result<TransferRecord, Error>) -> Void
+    ) {
+        let tempFileName = isURL ? "link.url" : "clipboard.txt"
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("nearside_text_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempFile = tempDir.appendingPathComponent(tempFileName)
+
+        do {
+            try text.write(to: tempFile, atomically: true, encoding: .utf8)
+        } catch {
+            completion(.failure(TransferEngineError.fileAccessError("Failed to stage text payload")))
+            return
+        }
+
+        sendFiles(
+            files: [tempFile],
+            to: device,
+            senderId: senderId,
+            retryPolicy: retryPolicy,
+            onProgress: onProgress,
+            completion: { result in
+                try? FileManager.default.removeItem(at: tempDir)
+                switch result {
+                case .success(var record):
+                    record.payloadType = isURL ? .url : .text
+                    record.payloadText = text
+                    completion(.success(record))
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        )
     }
 
     public func sendFiles(
@@ -117,6 +173,13 @@ public final class TransferEngine: @unchecked Sendable {
             }
 
             let transferId = manifest.transferId
+            let isTextOrUrl = files.count == 1 && (files.first?.pathExtension.lowercased() == "txt" || files.first?.pathExtension.lowercased() == "url")
+            let initialPayloadType: PayloadType = (files.first?.pathExtension.lowercased() == "url") ? .url : (files.first?.pathExtension.lowercased() == "txt" ? .text : .file)
+            var initialPayloadText: String? = nil
+            if isTextOrUrl, let firstFile = files.first {
+                initialPayloadText = try? String(contentsOf: firstFile, encoding: .utf8)
+            }
+
             let recordTemplate = TransferRecord(
                 id: transferId,
                 deviceName: device.name,
@@ -127,7 +190,9 @@ public final class TransferEngine: @unchecked Sendable {
                 totalSizeBytes: manifest.totalBytes,
                 progress: 0.0,
                 status: .transferring,
-                timestamp: Date()
+                timestamp: Date(),
+                payloadType: initialPayloadType,
+                payloadText: initialPayloadText
             )
 
             func executeAttempt(attempt: Int) {
@@ -562,10 +627,31 @@ public final class TransferEngine: @unchecked Sendable {
             for (_, h) in itemHandles { try? h.close() }
         }
 
-        if initialBytesReceived == manifest.totalBytes && manifest.totalBytes > 0 {
-            closeHandles()
+        func finalizeRecord() {
             currentRecord.progress = 1.0
             currentRecord.status = .completed
+
+            if let firstItem = manifest.items.first,
+               (firstItem.mimeType == "text/plain" || firstItem.mimeType == "text/uri-list") {
+                let destURL = destinationFolder.appendingPathComponent(firstItem.name)
+                if let content = try? String(contentsOf: destURL, encoding: .utf8) {
+                    currentRecord.payloadType = (firstItem.mimeType == "text/uri-list") ? .url : .text
+                    currentRecord.payloadText = content
+
+                    #if os(macOS)
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(content, forType: .string)
+                    #elseif os(iOS)
+                    UIPasteboard.general.string = content
+                    #endif
+                }
+            }
+        }
+
+        if initialBytesReceived == manifest.totalBytes && manifest.totalBytes > 0 {
+            closeHandles()
+            finalizeRecord()
             onComplete(.success(currentRecord))
             return
         }
@@ -595,8 +681,7 @@ public final class TransferEngine: @unchecked Sendable {
                             }
                         }
                     }
-                    currentRecord.progress = 1.0
-                    currentRecord.status = .completed
+                    finalizeRecord()
                     onComplete(.success(currentRecord))
                     return
                 }

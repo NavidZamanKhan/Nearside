@@ -14,6 +14,7 @@ public final class DiscoveryService: @unchecked Sendable {
     private var boundPort: UInt16 = 41433
 
     public var onDiscoveredDevicesChanged: (([NearsideDevice]) -> Void)?
+    public var onInboundConnection: ((NWConnection) -> Void)?
 
     private var discoveredMap: [String: NearsideDevice] = [:]
 
@@ -85,9 +86,16 @@ public final class DiscoveryService: @unchecked Sendable {
                 }
             }
 
-            newListener.newConnectionHandler = { connection in
-                // Reserved for transport session handoff in Milestone 3
-                connection.cancel()
+            newListener.newConnectionHandler = { [weak self] connection in
+                guard let self = self else {
+                    connection.cancel()
+                    return
+                }
+                if let handler = self.onInboundConnection {
+                    handler(connection)
+                } else {
+                    connection.cancel()
+                }
             }
 
             newListener.start(queue: queue)

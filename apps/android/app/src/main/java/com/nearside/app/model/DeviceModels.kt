@@ -46,6 +46,12 @@ enum class TransferStatus {
     CANCELLED
 }
 
+enum class PayloadType {
+    FILE,
+    TEXT,
+    URL
+}
+
 data class TransferRecord(
     val id: String = UUID.randomUUID().toString(),
     val deviceName: String,
@@ -56,7 +62,9 @@ data class TransferRecord(
     val totalSizeBytes: Long,
     val progress: Float = 1.0f,
     val status: TransferStatus = TransferStatus.COMPLETED,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val payloadType: PayloadType = PayloadType.FILE,
+    val payloadText: String? = null
 ) {
     val formattedSize: String
         get() {

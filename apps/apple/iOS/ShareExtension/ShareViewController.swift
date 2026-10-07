@@ -108,6 +108,25 @@ public final class ShareViewController: UIViewController {
                             collectedURLs.append(dest)
                         }
                     }
+                } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                    provider.loadItem(forTypeIdentifier: UTType.url.identifier, options: nil) { item, error in
+                        defer { group.leave() }
+                        if let url = item as? URL {
+                            let dest = stageDir.appendingPathComponent("link.url")
+                            try? url.absoluteString.write(to: dest, atomically: true, encoding: .utf8)
+                            collectedURLs.append(dest)
+                        }
+                    }
+                } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+                    provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, error in
+                        defer { group.leave() }
+                        if let text = item as? String {
+                            let isURL = text.hasPrefix("http://") || text.hasPrefix("https://")
+                            let dest = stageDir.appendingPathComponent(isURL ? "link.url" : "clipboard.txt")
+                            try? text.write(to: dest, atomically: true, encoding: .utf8)
+                            collectedURLs.append(dest)
+                        }
+                    }
                 } else {
                     group.leave()
                 }

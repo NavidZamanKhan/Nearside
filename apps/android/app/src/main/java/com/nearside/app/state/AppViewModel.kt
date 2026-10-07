@@ -14,6 +14,7 @@ import com.nearside.app.discovery.NsdDiscoveryService
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.DeviceReachability
 import com.nearside.app.model.NearsideDevice
+import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.model.TransferStatus
@@ -35,7 +36,8 @@ data class NearsideUiState(
     val discoveredDevices: List<NearsideDevice> = emptyList(),
     val recentTransfers: List<TransferRecord> = emptyList(),
     val activeTransfer: TransferRecord? = null,
-    val activePairingCode: String = "4819 2034"
+    val activePairingCode: String = "4819 2034",
+    val toastMessage: String? = null
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -331,6 +333,78 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearHistory() {
         _uiState.update { it.copy(recentTransfers = emptyList()) }
+    }
+
+    fun sendClipboard(device: NearsideDevice) {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val clip = clipboard?.primaryClip
+        val text = clip?.getItemAt(0)?.text?.toString()
+
+        if (text.isNullOrBlank()) {
+            _uiState.update { it.copy(toastMessage = "Clipboard is empty") }
+            viewModelScope.launch {
+                delay(2000)
+                _uiState.update { it.copy(toastMessage = null) }
+            }
+            return
+        }
+
+        val isUrl = text.startsWith("http://") || text.startsWith("https://")
+        val displayFilename = if (isUrl) text else if (text.length > 25) text.take(25) + "..." else text
+
+        val record = TransferRecord(
+            deviceName = device.name,
+            devicePlatform = device.platform,
+            direction = TransferDirection.OUTGOING,
+            filename = displayFilename,
+            fileCount = 1,
+            totalSizeBytes = text.toByteArray(Charsets.UTF_8).size.toLong(),
+            progress = 0.05f,
+            status = TransferStatus.TRANSFERRING,
+            payloadType = if (isUrl) PayloadType.URL else PayloadType.TEXT,
+            payloadText = text
+        )
+        _uiState.update { it.copy(activeTransfer = record) }
+
+        val host = device.ipAddress
+        if (host != null && host.isNotEmpty()) {
+            viewModelScope.launch {
+                val res = com.nearside.app.transfer.TransferEngine.sendText(
+                    text = text,
+                    isUrl = isUrl,
+                    host = host,
+                    port = device.port ?: 41433,
+                    senderId = deviceIdentity.publicIdentity,
+                    onProgress = { frac, _, _ ->
+                        _uiState.update { current ->
+                            current.activeTransfer?.let {
+                                current.copy(activeTransfer = it.copy(progress = frac))
+                            } ?: current
+                        }
+                    }
+                )
+
+                _uiState.update { current ->
+                    val finished = current.activeTransfer?.copy(
+                        progress = 1.0f,
+                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED
+                    )
+                    val updatedHistory = if (finished != null) {
+                        listOf(finished) + current.recentTransfers
+                    } else current.recentTransfers
+
+                    current.copy(
+                        activeTransfer = null,
+                        recentTransfers = updatedHistory,
+                        toastMessage = if (res.isSuccess) "Clipboard sent to ${device.name}" else "Failed to send clipboard"
+                    )
+                }
+                delay(2000)
+                _uiState.update { it.copy(toastMessage = null) }
+            }
+        } else {
+            simulateTransfer(device, listOf(displayFilename), text.toByteArray(Charsets.UTF_8).size.toLong())
+        }
     }
 
     override fun onCleared() {

@@ -31,7 +31,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode
@@ -73,6 +75,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.NearsideDevice
+import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.service.NearsideReceiverService
@@ -133,6 +136,7 @@ class MainActivity : ComponentActivity() {
                             viewModel.simulateTransfer(device, filenames, 25_000_000L)
                         }
                     },
+                    onBeamClipboard = { viewModel.sendClipboard(it) },
                     onClearHistory = { viewModel.clearHistory() }
                 )
             }
@@ -149,6 +153,7 @@ fun MainScreen(
     onPairWithCode: (String) -> Unit,
     onPairWithQrUri: (String) -> Boolean,
     onSendFiles: (NearsideDevice, List<Uri>) -> Unit,
+    onBeamClipboard: (NearsideDevice) -> Unit,
     onClearHistory: () -> Unit
 ) {
     var showQrDialog by remember { mutableStateOf(false) }
@@ -204,6 +209,25 @@ fun MainScreen(
         ) {
             item { Spacer(modifier = Modifier.height(4.dp)) }
 
+            // Toast / Feedback banner
+            uiState.toastMessage?.let { toast ->
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.ContentPaste, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = toast, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                    }
+                }
+            }
+
             // Active Transfer Section (if any)
             uiState.activeTransfer?.let { transfer ->
                 item {
@@ -258,6 +282,7 @@ fun MainScreen(
                             targetDeviceForPicker = device
                             filePickerLauncher.launch("*/*")
                         },
+                        onBeamClipboard = { onBeamClipboard(device) },
                         onUnpairClick = { onUnpair(device.id) }
                     )
                 }
@@ -456,6 +481,7 @@ fun IdentityCard(
 fun DeviceRowCard(
     device: NearsideDevice,
     onSendClick: () -> Unit,
+    onBeamClipboard: () -> Unit,
     onUnpairClick: () -> Unit
 ) {
     Card(
@@ -497,6 +523,20 @@ fun DeviceRowCard(
                 )
             }
 
+            IconButton(
+                onClick = onBeamClipboard,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    Icons.Default.ContentPaste,
+                    contentDescription = "Beam Clipboard",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
             Button(
                 onClick = onSendClick,
                 colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
@@ -518,6 +558,8 @@ fun TransferRow(record: TransferRecord) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         val isIncoming = record.direction == TransferDirection.INCOMING
+        val isUrl = record.payloadType == PayloadType.URL
+        val isText = record.payloadType == PayloadType.TEXT
         Box(
             modifier = Modifier
                 .size(32.dp)
@@ -525,8 +567,14 @@ fun TransferRow(record: TransferRecord) {
                 .background(if (isIncoming) NearsideGreen.copy(alpha = 0.15f) else NearsideBlue.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center
         ) {
+            val iconVector = when {
+                isUrl -> Icons.Default.Link
+                isText -> Icons.Default.ContentPaste
+                isIncoming -> Icons.AutoMirrored.Filled.ArrowBack
+                else -> Icons.AutoMirrored.Filled.ArrowForward
+            }
             Icon(
-                imageVector = if (isIncoming) Icons.AutoMirrored.Filled.ArrowBack else Icons.AutoMirrored.Filled.ArrowForward,
+                imageVector = iconVector,
                 contentDescription = null,
                 tint = if (isIncoming) NearsideGreen else NearsideBlue,
                 modifier = Modifier.size(16.dp)

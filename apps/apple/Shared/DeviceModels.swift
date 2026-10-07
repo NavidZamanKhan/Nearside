@@ -86,6 +86,12 @@ public enum TransferStatus: String, Codable {
     case cancelled = "CANCELLED"
 }
 
+public enum PayloadType: String, Codable, CaseIterable {
+    case file = "file"
+    case text = "text"
+    case url = "url"
+}
+
 public struct TransferRecord: Identifiable, Codable, Equatable {
     public let id: String
     public let deviceName: String
@@ -97,6 +103,8 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
     public var progress: Double
     public var status: TransferStatus
     public let timestamp: Date
+    public var payloadType: PayloadType
+    public var payloadText: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -108,7 +116,9 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
         totalSizeBytes: Int64,
         progress: Double = 1.0,
         status: TransferStatus = .completed,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        payloadType: PayloadType = .file,
+        payloadText: String? = nil
     ) {
         self.id = id
         self.deviceName = deviceName
@@ -120,6 +130,8 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
         self.progress = progress
         self.status = status
         self.timestamp = timestamp
+        self.payloadType = payloadType
+        self.payloadText = payloadText
     }
 
     public var formattedSize: String {

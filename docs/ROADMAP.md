@@ -42,4 +42,11 @@ Nearside is an open-source, local-first cross-platform file and content sharing 
 - [x] Native iOS Share Extension target (`ShareViewController` + `IOSShareRecipientPickerView`) with eager attachment staging.
 - [x] Automated iOS build pipeline (`scripts/build_ios.sh`), test harness (`Milestone5Tests.swift`), and full multiplatform verification (`scripts/verify_milestone5.sh`).
 
+### Milestone 6: Instant Clipboard, URL, and Text Sharing (Completed)
+- [x] Protocol support for `text/plain` and `text/uri-list` payload types with zero-file-staging transfer pipeline.
+- [x] Automatic inbound clipboard population across macOS (`NSPasteboard.general`), Android (`ClipboardManager`), and iOS (`UIPasteboard.general`).
+- [x] Zero-click "Beam Clipboard" actions on macOS menu bar shelf popover, Android Compose home screen, and iOS home view.
+- [x] Direct URL and text ingestion in iOS native Share Extension and Android native Sharesheet target.
+- [x] Automated test suites and cross-platform verification harness (`verify_clipboard_transfer.sh`).
+
 

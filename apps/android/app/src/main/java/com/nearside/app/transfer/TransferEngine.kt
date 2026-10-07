@@ -2,6 +2,7 @@ package com.nearside.app.transfer
 
 import com.nearside.app.crypto.PinnedTrustStore
 import com.nearside.app.model.DevicePlatform
+import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.model.TransferStatus
@@ -44,10 +45,16 @@ object TransferEngine {
                 }
             }
             val shaHex = md.digest().joinToString("") { "%02x".format(it) }
+            val ext = file.extension.lowercase()
+            val mime = when (ext) {
+                "txt", "md", "json" -> "text/plain"
+                "url" -> "text/uri-list"
+                else -> "application/octet-stream"
+            }
             TransferItemManifest(
                 index = index,
                 name = file.name,
-                mimeType = "application/octet-stream",
+                mimeType = mime,
                 size = file.length(),
                 sha256 = shaHex
             )
@@ -62,6 +69,63 @@ object TransferEngine {
             itemCount = items.size,
             items = items
         )
+    }
+
+    fun buildTextManifest(text: String, isUrl: Boolean = false, senderId: String): Pair<TransferManifest, File> {
+        val fileName = if (isUrl) "link.url" else "clipboard.txt"
+        val tempFile = File.createTempFile("nearside_text_", if (isUrl) ".url" else ".txt")
+        tempFile.writeText(text, Charsets.UTF_8)
+        val md = MessageDigest.getInstance("SHA-256")
+        val shaHex = md.digest(tempFile.readBytes()).joinToString("") { "%02x".format(it) }
+        val item = TransferItemManifest(
+            index = 0,
+            name = fileName,
+            mimeType = if (isUrl) "text/uri-list" else "text/plain",
+            size = tempFile.length(),
+            sha256 = shaHex
+        )
+        val manifest = TransferManifest(
+            transferId = "tx_${UUID.randomUUID().toString().take(12).lowercase()}",
+            senderId = senderId,
+            totalBytes = tempFile.length(),
+            itemCount = 1,
+            items = listOf(item)
+        )
+        return Pair(manifest, tempFile)
+    }
+
+    suspend fun sendText(
+        text: String,
+        isUrl: Boolean = false,
+        host: String,
+        port: Int = 41433,
+        senderId: String,
+        retryPolicy: RetryPolicy = RetryPolicy(),
+        onProgress: (Float, Long, Long) -> Unit
+    ): Result<TransferManifest> = withContext(Dispatchers.IO) {
+        val (manifest, tempFile) = buildTextManifest(text, isUrl, senderId)
+        try {
+            var lastException: Exception? = null
+            for (attempt in 1..retryPolicy.maxAttempts) {
+                try {
+                    return@withContext performSendAttempt(
+                        files = listOf(tempFile),
+                        manifest = manifest,
+                        host = host,
+                        port = port,
+                        onProgress = onProgress
+                    )
+                } catch (e: Exception) {
+                    lastException = e
+                    if (attempt < retryPolicy.maxAttempts) {
+                        delay(retryPolicy.delayMs(attempt))
+                    }
+                }
+            }
+            Result.failure(lastException ?: IllegalStateException("Failed to send text after ${retryPolicy.maxAttempts} attempts"))
+        } finally {
+            try { tempFile.delete() } catch (ignored: Exception) {}
+        }
     }
 
     suspend fun sendFiles(
@@ -337,7 +401,27 @@ object TransferEngine {
 
             if (totalResumed == manifest.totalBytes && manifest.totalBytes > 0) {
                 fileOutputs.values.forEach { try { it.close() } catch (ignored: Exception) {} }
-                record = record.copy(progress = 1.0f, status = TransferStatus.COMPLETED)
+                val firstItem = manifest.items.firstOrNull()
+                val isText = firstItem?.mimeType == "text/plain"
+                val isUrl = firstItem?.mimeType == "text/uri-list"
+                var payloadText: String? = null
+                var payloadType = PayloadType.FILE
+
+                if (firstItem != null && (isText || isUrl)) {
+                    val receivedFile = File(destinationDir, firstItem.name)
+                    if (receivedFile.exists()) {
+                        try {
+                            payloadText = receivedFile.readText(Charsets.UTF_8)
+                            payloadType = if (isUrl) PayloadType.URL else PayloadType.TEXT
+                        } catch (ignored: Exception) {}
+                    }
+                }
+                record = record.copy(
+                    progress = 1.0f,
+                    status = TransferStatus.COMPLETED,
+                    payloadType = payloadType,
+                    payloadText = payloadText
+                )
                 onProgress(1.0f, record)
                 return@withContext Result.success(record)
             }
@@ -394,7 +478,28 @@ object TransferEngine {
                     }
                 }
 
-                record = record.copy(progress = 1.0f, status = TransferStatus.COMPLETED)
+                val firstItem = manifest.items.firstOrNull()
+                val isText = firstItem?.mimeType == "text/plain"
+                val isUrl = firstItem?.mimeType == "text/uri-list"
+                var payloadText: String? = null
+                var payloadType = PayloadType.FILE
+
+                if (firstItem != null && (isText || isUrl)) {
+                    val receivedFile = File(destinationDir, firstItem.name)
+                    if (receivedFile.exists()) {
+                        try {
+                            payloadText = receivedFile.readText(Charsets.UTF_8)
+                            payloadType = if (isUrl) PayloadType.URL else PayloadType.TEXT
+                        } catch (ignored: Exception) {}
+                    }
+                }
+
+                record = record.copy(
+                    progress = 1.0f,
+                    status = TransferStatus.COMPLETED,
+                    payloadType = payloadType,
+                    payloadText = payloadText
+                )
                 onProgress(1.0f, record)
                 Result.success(record)
             } finally {

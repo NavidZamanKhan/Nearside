@@ -35,6 +35,23 @@ public struct MenuBarShelfView: View {
                 Divider()
             }
 
+            // Clipboard Action Feedback Banner
+            if let toast = appState.clipboardToastMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.on.clipboard.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.accentColor)
+                    Text(toast)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.12))
+                Divider()
+            }
+
             // Main scrollable content
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
@@ -145,6 +162,7 @@ public struct MenuBarShelfView: View {
                         DeviceRowView(
                             device: device,
                             onSend: { promptSendFile(to: device) },
+                            onSendClipboard: { appState.sendClipboard(to: device) },
                             onDropFiles: { urls in appState.sendFiles(urls: urls, to: device) }
                         )
                     }
@@ -242,6 +260,7 @@ public struct MenuBarShelfView: View {
 private struct DeviceRowView: View {
     let device: NearsideDevice
     let onSend: () -> Void
+    let onSendClipboard: () -> Void
     let onDropFiles: ([URL]) -> Void
     @State private var isHovered: Bool = false
     @State private var isDropTarget: Bool = false
@@ -272,7 +291,15 @@ private struct DeviceRowView: View {
 
             Spacer()
 
-            Button("Send File...", action: onSend)
+            Button(action: onSendClipboard) {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Beam current clipboard to \(device.name)")
+
+            Button("Send...", action: onSend)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
         }
@@ -320,9 +347,20 @@ private struct TransferRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: record.direction == .incoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+            let iconName: String = {
+                if record.payloadType == .url { return "link.circle.fill" }
+                if record.payloadType == .text { return "doc.on.clipboard.fill" }
+                return record.direction == .incoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill"
+            }()
+            let iconColor: Color = {
+                if record.payloadType == .url { return .blue }
+                if record.payloadType == .text { return .purple }
+                return record.direction == .incoming ? .green : .accentColor
+            }()
+
+            Image(systemName: iconName)
                 .symbolRenderingMode(.hierarchical)
-                .foregroundColor(record.direction == .incoming ? .green : .accentColor)
+                .foregroundColor(iconColor)
                 .font(.system(size: 15))
 
             VStack(alignment: .leading, spacing: 2) {
@@ -340,7 +378,17 @@ private struct TransferRowView: View {
 
             Spacer()
 
-            if record.direction == .incoming {
+            if record.payloadType == .url, let text = record.payloadText, let url = URL(string: text) {
+                Button(action: {
+                    NSWorkspace.shared.open(url)
+                }) {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Open in Browser")
+            } else if record.direction == .incoming {
                 Button(action: {
                     NSWorkspace.shared.activateFileViewerSelecting([
                         downloadsURL.appendingPathComponent(record.filename)

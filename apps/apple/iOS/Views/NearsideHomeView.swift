@@ -39,6 +39,20 @@ public struct NearsideHomeView: View {
                     .padding(.vertical, 4)
                 }
 
+                // Clipboard Toast Banner
+                if let toast = appState.clipboardToastMessage {
+                    Section {
+                        HStack(spacing: 10) {
+                            Image(systemName: "doc.on.clipboard.fill")
+                                .foregroundStyle(Color.accentColor)
+                            Text(toast)
+                                .font(.subheadline)
+                                .bold()
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
                 // Active Transfer Banner
                 if let transfer = appState.activeTransfer {
                     Section(header: Text("Active Transfer")) {
@@ -105,6 +119,17 @@ public struct NearsideHomeView: View {
                                 Spacer()
 
                                 Button {
+                                    appState.sendClipboard(to: device)
+                                } label: {
+                                    Image(systemName: "doc.on.clipboard")
+                                        .font(.subheadline)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                                }
+                                .buttonStyle(.borderless)
+
+                                Button {
                                     sendSimulatedFile(to: device)
                                 } label: {
                                     Text("Send")
@@ -157,7 +182,12 @@ public struct NearsideHomeView: View {
                     Section(header: Text("Recent Transfers")) {
                         ForEach(appState.transferHistory.prefix(5)) { record in
                             HStack {
-                                Image(systemName: record.direction == .incoming ? "arrow.down.circle" : "arrow.up.circle")
+                                let iconName: String = {
+                                    if record.payloadType == .url { return "link.circle.fill" }
+                                    if record.payloadType == .text { return "doc.on.clipboard.fill" }
+                                    return record.direction == .incoming ? "arrow.down.circle" : "arrow.up.circle"
+                                }()
+                                Image(systemName: iconName)
                                     .foregroundStyle(record.status == .completed ? Color.green : Color.red)
 
                                 VStack(alignment: .leading, spacing: 2) {
