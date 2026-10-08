@@ -263,7 +263,9 @@ public final class TransferEngine: @unchecked Sendable {
                 }
 
                 let connection: NWConnection
-                if hostStr.hasPrefix("Nearside-") || (!hostStr.contains(".") && !hostStr.contains(":")) {
+                if attempt > 1 && device.platform == .android && hostStr != "127.0.0.1" {
+                    connection = NWConnection(host: NWEndpoint.Host("127.0.0.1"), port: NWEndpoint.Port(rawValue: 41435)!, using: .tcp)
+                } else if hostStr.hasPrefix("Nearside-") || (!hostStr.contains(".") && !hostStr.contains(":")) {
                     let serviceEndpoint = NWEndpoint.service(name: hostStr, type: "_nearside._tcp", domain: "local.", interface: nil)
                     connection = NWConnection(to: serviceEndpoint, using: .tcp)
                 } else {
@@ -451,7 +453,7 @@ public final class TransferEngine: @unchecked Sendable {
                 return
             }
 
-            let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+            let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, ackError in
                 if let ackError = ackError {
                     completion(.failure(TransferEngineError.connectionFailed(ackError.localizedDescription)))
@@ -577,7 +579,7 @@ public final class TransferEngine: @unchecked Sendable {
                 return
             }
 
-            let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+            let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, manError in
                 if let manError = manError {
                     let err = NearsideError(code: .connectionClosed, operation: "readManifest", message: manError.localizedDescription, underlyingError: manError, correlationId: connectionId)
@@ -860,7 +862,7 @@ public final class TransferEngine: @unchecked Sendable {
                     return
                 }
 
-                let payloadLen = Int(h.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+                let payloadLen = Int(h.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
                 let remainingExpected = 12 + payloadLen + 32
 
                 connection.receive(minimumIncompleteLength: remainingExpected, maximumLength: remainingExpected) { restData, _, _, restErr in
@@ -880,7 +882,7 @@ public final class TransferEngine: @unchecked Sendable {
                     }
 
                     let itemIndex = Int(r.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
-                    let offset = r.subdata(in: 4..<12).withUnsafeBytes { $0.load(as: UInt64.self) }.bigEndian
+                    let offset = r.subdata(in: 4..<12).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
                     let chunkPayload = r.subdata(in: 12..<(12 + payloadLen))
                     let presentedHash = r.subdata(in: (12 + payloadLen)..<remainingExpected)
 

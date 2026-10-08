@@ -26,6 +26,7 @@ xcrun swiftc -O \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
     apps/apple/Shared/Crypto/QRPairingProtocol.swift \
     apps/apple/Shared/Crypto/ShortCodePakeProtocol.swift \
+    apps/apple/Shared/Discovery/DiscoveryService.swift \
     apps/apple/Shared/Transfer/TransferProtocol.swift \
     apps/apple/Shared/Transfer/TransferEngine.swift \
     apps/apple/Tests/DiagnosticTests.swift \

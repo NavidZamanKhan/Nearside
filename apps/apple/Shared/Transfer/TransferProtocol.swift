@@ -158,20 +158,20 @@ public struct TransferChunk {
     public static func decode(from streamData: Data) -> (chunk: TransferChunk, bytesConsumed: Int)? {
         guard streamData.count >= 21 + 32 else { return nil }
 
-        let magic = streamData.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
+        let magic = streamData.subdata(in: 0..<4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
         guard magic == TransferChunk.magic else { return nil }
 
         let frameType = streamData[4]
         guard frameType == FrameType.chunk.rawValue else { return nil }
 
-        let length = Int(streamData.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+        let length = Int(streamData.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
         guard length <= maxChunkSize else { return nil }
 
         let totalExpectedLength = 21 + length + 32
         guard streamData.count >= totalExpectedLength else { return nil }
 
-        let itemIndex = streamData.subdata(in: 9..<13).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
-        let offset = streamData.subdata(in: 13..<21).withUnsafeBytes { $0.load(as: UInt64.self) }.bigEndian
+        let itemIndex = streamData.subdata(in: 9..<13).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
+        let offset = streamData.subdata(in: 13..<21).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
 
         let chunkPayload = streamData.subdata(in: 21..<(21 + length))
         let presentedHash = streamData.subdata(in: (21 + length)..<totalExpectedLength)

@@ -170,8 +170,8 @@ class NearsideReceiverService : Service() {
                     state = "listening"
                 )
                 val trustStore = PinnedTrustStore(this@NearsideReceiverService)
-                val destDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                    ?: filesDir
+                val destDir = (android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    ?: filesDir).apply { mkdirs() }
 
                 while (isActive && !socket.isClosed) {
                     try {

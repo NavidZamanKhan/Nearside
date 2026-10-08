@@ -529,6 +529,7 @@ object TransferEngine {
                     fileOutputs[item.index] = FileOutputStream(destFile, true)
                 } else {
                     if (destFile.exists()) destFile.delete()
+                    destFile.parentFile?.mkdirs()
                     destFile.createNewFile()
                     fileOutputs[item.index] = FileOutputStream(destFile, false)
                 }

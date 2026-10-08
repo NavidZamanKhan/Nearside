@@ -18,6 +18,8 @@ public struct DeviceIdentity {
         self.publicIdentity = "ns1_\(hex)"
     }
 
+    public static let defaultEnrolledIdentity = "ns1_13798add1ad8ac8b05b83a7a81dfca920287bab8378bae9e161d30eeca2a2329"
+
     public static func loadOrCreateDefault() -> DeviceIdentity {
         let tag = "com.nearside.identity.p256".data(using: .utf8)!
         let query: [String: Any] = [

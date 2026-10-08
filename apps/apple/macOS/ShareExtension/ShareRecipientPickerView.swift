@@ -1,93 +1,153 @@
 import SwiftUI
 
 public struct ShareRecipientPickerView: View {
-    let itemCount: Int
-    let devices: [NearsideDevice]
-    let onSelectDevice: (NearsideDevice) -> Void
+    @ObservedObject var viewModel: ShareExtensionViewModel
     let onCancel: () -> Void
-
-    @State private var selectedDevice: NearsideDevice?
-    @State private var isTransferring: Bool = false
-    @State private var progress: Double = 0.0
+    let onComplete: () -> Void
 
     public init(
-        itemCount: Int,
-        devices: [NearsideDevice],
-        onSelectDevice: @escaping (NearsideDevice) -> Void,
-        onCancel: @escaping () -> Void
+        viewModel: ShareExtensionViewModel,
+        onCancel: @escaping () -> Void,
+        onComplete: @escaping () -> Void
     ) {
-        self.itemCount = itemCount
-        self.devices = devices
-        self.onSelectDevice = onSelectDevice
+        self.viewModel = viewModel
         self.onCancel = onCancel
+        self.onComplete = onComplete
+    }
+
+    private var subtitleText: String {
+        if viewModel.isExtracting {
+            return "Preparing items..."
+        }
+        if viewModel.isCompleted {
+            return "Sent successfully"
+        }
+        if viewModel.isTransferring {
+            return "Sending..."
+        }
+        let count = viewModel.stagedURLs.count
+        if count == 1, let first = viewModel.stagedURLs.first {
+            return first.lastPathComponent
+        }
+        return "\(count) item\(count == 1 ? "" : "s") ready to send"
     }
 
     public var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             // Header
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Share with Nearside")
                         .font(.headline)
-                    Text("\(itemCount) item\(itemCount == 1 ? "" : "s") ready to send")
+                    Text(subtitleText)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
                 Spacer()
-                Button("Cancel", action: onCancel)
-                    .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
+                Button(viewModel.isCompleted ? "Done" : "Cancel") {
+                    if viewModel.isTransferring {
+                        viewModel.cancelCurrentTransfer()
+                    }
+                    if viewModel.isCompleted {
+                        onComplete()
+                    } else {
+                        onCancel()
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
             }
 
             Divider()
 
-            if isTransferring, let device = selectedDevice {
-                // Transfer progress state
+            if viewModel.isExtracting {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                    Text("Loading files to share...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxHeight: .infinity)
+            } else if let error = viewModel.errorMessage {
+                VStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 28))
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
+                    Button("Try Again") {
+                        if let dev = viewModel.selectedDevice {
+                            viewModel.startTransfer(to: dev, onComplete: onComplete)
+                        } else {
+                            viewModel.errorMessage = nil
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .frame(maxHeight: .infinity)
+            } else if viewModel.isCompleted, let device = viewModel.selectedDevice {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 36))
+                        .foregroundColor(.green)
+                    Text("Delivered to \(device.name)")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Saved to Downloads on device")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxHeight: .infinity)
+            } else if viewModel.isTransferring, let device = viewModel.selectedDevice {
                 VStack(spacing: 12) {
                     ZStack {
                         Circle()
-                            .fill(Color.blue.opacity(0.15))
+                            .fill(Color.accentColor.opacity(0.15))
                             .frame(width: 48, height: 48)
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 24))
-                            .foregroundColor(.blue)
+                            .foregroundColor(.accentColor)
                     }
 
                     Text("Sending to \(device.name)...")
                         .font(.system(size: 13, weight: .medium))
 
-                    ProgressView(value: progress)
+                    ProgressView(value: viewModel.progress)
                         .progressViewStyle(.linear)
-                        .frame(width: 200)
+                        .frame(width: 220)
 
-                    Text("\(Int(progress * 100))%")
+                    Text("\(Int(viewModel.progress * 100))%")
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.secondary)
                 }
-                .padding(.vertical, 16)
+                .frame(maxHeight: .infinity)
             } else {
-                // Device selection grid
+                // Device selection
                 VStack(alignment: .leading, spacing: 8) {
                     Text("CHOOSE RECIPIENT")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary)
 
-                    if devices.isEmpty {
+                    if viewModel.devices.isEmpty {
                         VStack(spacing: 6) {
                             Text("No nearby devices found")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
-                            Text("Ensure the recipient device has Nearside active on the same Wi-Fi network.")
+                            Text("Ensure the recipient device has Nearside open on Wi-Fi.")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 12) {
-                                ForEach(devices) { device in
+                                ForEach(viewModel.devices) { device in
                                     deviceCard(device: device)
                                 }
                             }
@@ -95,17 +155,18 @@ public struct ShareRecipientPickerView: View {
                         }
                     }
                 }
+                .frame(maxHeight: .infinity)
             }
 
             Spacer()
         }
         .padding(16)
-        .frame(width: 360, height: 220)
+        .frame(width: 360, height: 230)
     }
 
     private func deviceCard(device: NearsideDevice) -> some View {
         Button(action: {
-            startTransfer(to: device)
+            viewModel.startTransfer(to: device, onComplete: onComplete)
         }) {
             VStack(spacing: 8) {
                 ZStack {
@@ -127,28 +188,11 @@ public struct ShareRecipientPickerView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            .frame(width: 88, height: 96)
+            .frame(width: 92, height: 96)
             .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
             .cornerRadius(10)
         }
         .buttonStyle(.plain)
-    }
-
-    private func startTransfer(to device: NearsideDevice) {
-        selectedDevice = device
-        isTransferring = true
-        progress = 0.1
-
-        Task {
-            for step in 1...10 {
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                await MainActor.run {
-                    self.progress = Double(step) / 10.0
-                }
-            }
-            await MainActor.run {
-                onSelectDevice(device)
-            }
-        }
+        .disabled(viewModel.stagedURLs.isEmpty || viewModel.isExtracting)
     }
 }
