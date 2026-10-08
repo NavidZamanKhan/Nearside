@@ -50,11 +50,18 @@ xcrun swiftc -O -emit-executable \
 cp apps/apple/macOS/Resources/App-Info.plist "$APP_BUNDLE/Contents/Info.plist"
 
 echo "[3/4] Code signing bundles (ad-hoc)..."
-codesign -s - --force "$APPEX_BUNDLE"
+codesign -s - --force --entitlements apps/apple/macOS/ShareExtension/NearsideShare.entitlements "$APPEX_BUNDLE"
 codesign -s - --force "$APP_BUNDLE"
 
 echo "[4/4] Verifying bundle signatures..."
 codesign -vvv "$APPEX_BUNDLE"
 codesign -vvv "$APP_BUNDLE"
 
-echo "Build successful: $APP_BUNDLE"
+echo "[5/5] Installing to /Applications and registering Share extension..."
+rm -rf /Applications/Nearside.app
+cp -R "$APP_BUNDLE" /Applications/Nearside.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R /Applications/Nearside.app
+pluginkit -a /Applications/Nearside.app/Contents/PlugIns/NearsideShare.appex
+pluginkit -e use -i com.nearside.app.macos.share
+
+echo "Build and installation successful: /Applications/Nearside.app"

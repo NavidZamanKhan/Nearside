@@ -18,24 +18,14 @@ public final class ShareViewController: NSViewController {
 
         let knownDevices = [
             NearsideDevice(
-                id: "dev_iqoo_neo9",
+                id: "ns1_0859d384629f7bb1e9a809502e693103c865c1b411ae565eb053a97b3b43d888",
                 name: "iQOO Neo9",
                 platform: .android,
-                fingerprint: "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
-                ipAddress: "192.168.0.101",
+                fingerprint: "ns1_0859d384629f7bb1e9a809502e693103c865c1b411ae565eb053a97b3b43d888",
+                ipAddress: "192.168.0.100",
                 port: 41433,
                 reachability: .online,
                 lastSeen: Date()
-            ),
-            NearsideDevice(
-                id: "dev_ipad_pro",
-                name: "iPad Air",
-                platform: .iOS,
-                fingerprint: "ns1_c5e891b00142fa9166da23491f08cb34",
-                ipAddress: "192.168.0.108",
-                port: 41433,
-                reachability: .unreachable,
-                lastSeen: Date().addingTimeInterval(-86400 * 2)
             )
         ]
 
