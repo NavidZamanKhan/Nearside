@@ -21,6 +21,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 data class RetryPolicy(
     val maxAttempts: Int = 3,
@@ -34,6 +35,17 @@ data class RetryPolicy(
 }
 
 object TransferEngine {
+
+    private val cancelledTransfers = ConcurrentHashMap.newKeySet<String>()
+
+    fun cancelTransfer(transferId: String) {
+        cancelledTransfers.add(transferId)
+        NearsideLogger.info("transfer", "cancelTransfer", "Cancellation marked for transfer $transferId", correlationId = transferId)
+    }
+
+    fun isTransferCancelled(transferId: String): Boolean {
+        return cancelledTransfers.contains(transferId)
+    }
 
     fun buildManifest(files: List<File>, senderId: String): TransferManifest {
         val items = files.mapIndexed { index, file ->
@@ -102,7 +114,8 @@ object TransferEngine {
         port: Int = 41433,
         senderId: String,
         retryPolicy: RetryPolicy = RetryPolicy(),
-        onProgress: (Float, Long, Long) -> Unit
+        onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
+        onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
         val (manifest, tempFile) = buildTextManifest(text, isUrl, senderId)
         try {
@@ -114,7 +127,8 @@ object TransferEngine {
                         manifest = manifest,
                         host = host,
                         port = port,
-                        onProgress = onProgress
+                        onProgress = onProgress,
+                        onProgressMetrics = onProgressMetrics
                     )
                 } catch (e: Exception) {
                     lastException = e
@@ -135,7 +149,8 @@ object TransferEngine {
         port: Int = 41433,
         senderId: String,
         retryPolicy: RetryPolicy = RetryPolicy(),
-        onProgress: (Float, Long, Long) -> Unit
+        onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
+        onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
         val manifest = buildManifest(files, senderId)
         var lastException: Exception? = null
@@ -166,7 +181,8 @@ object TransferEngine {
                     manifest = manifest,
                     host = host,
                     port = port,
-                    onProgress = onProgress
+                    onProgress = onProgress,
+                    onProgressMetrics = onProgressMetrics
                 )
             } catch (e: Exception) {
                 lastException = e
@@ -202,7 +218,8 @@ object TransferEngine {
         manifest: TransferManifest,
         host: String,
         port: Int,
-        onProgress: (Float, Long, Long) -> Unit
+        onProgress: (Float, Long, Long) -> Unit,
+        onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> {
         Socket(host, port).use { socket ->
             socket.tcpNoDelay = true
@@ -272,6 +289,7 @@ object TransferEngine {
             var totalTransferred = ack.bytesReceived
             val totalBytes = manifest.totalBytes
             val chunkBuffer = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
+            val startTime = System.currentTimeMillis()
 
             for (index in startItem until files.size) {
                 val file = files[index]
@@ -285,6 +303,18 @@ object TransferEngine {
                     var fileOffset = initialSkip
                     var read: Int
                     while (fileOffset < itemManifest.size) {
+                        if (isTransferCancelled(manifest.transferId)) {
+                            cancelledTransfers.remove(manifest.transferId)
+                            val cancelErr = NearsideError(
+                                code = NearsideErrorCode.TRANSFER_INTERRUPTED,
+                                operation = "performSendAttempt",
+                                message = "Transfer cancelled by user",
+                                correlationId = manifest.transferId
+                            )
+                            NearsideLogger.info("transfer", "performSendAttempt", "Transfer aborted due to user cancellation", state = "cancelled", correlationId = manifest.transferId)
+                            return Result.failure(cancelErr)
+                        }
+
                         val toRead = Math.min(chunkBuffer.size.toLong(), itemManifest.size - fileOffset).toInt()
                         read = fis.read(chunkBuffer, 0, toRead)
                         if (read <= 0) break
@@ -296,7 +326,15 @@ object TransferEngine {
                         fileOffset += read
                         totalTransferred += read
                         val fraction = if (totalBytes > 0) totalTransferred.toFloat() / totalBytes else 1.0f
+
+                        val elapsedSec = (System.currentTimeMillis() - startTime) / 1000.0
+                        val bytesSentThisSession = totalTransferred - ack.bytesReceived
+                        val speed = if (elapsedSec > 0.1) bytesSentThisSession / elapsedSec else 0.0
+                        val remainingBytes = (totalBytes - totalTransferred).coerceAtLeast(0L)
+                        val eta = if (speed > 0) (remainingBytes / speed).toLong() else null
+
                         onProgress(fraction, totalTransferred, totalBytes)
+                        onProgressMetrics?.invoke(fraction, totalTransferred, totalBytes, speed, eta)
                     }
                 }
             }
@@ -310,6 +348,7 @@ object TransferEngine {
             out.flush()
 
             onProgress(1.0f, totalBytes, totalBytes)
+            onProgressMetrics?.invoke(1.0f, totalBytes, totalBytes, 0.0, 0L)
             NearsideLogger.info(
                 subsystem = "transfer",
                 operation = "performSendAttempt",
@@ -484,6 +523,8 @@ object TransferEngine {
                 fileCount = manifest.itemCount,
                 totalSizeBytes = manifest.totalBytes,
                 progress = if (manifest.totalBytes > 0) totalResumed.toFloat() / manifest.totalBytes else 0.0f,
+                speedBytesPerSec = 0.0,
+                etaSeconds = null,
                 status = TransferStatus.TRANSFERRING,
                 timestamp = System.currentTimeMillis()
             )
@@ -507,6 +548,8 @@ object TransferEngine {
                 }
                 record = record.copy(
                     progress = 1.0f,
+                    speedBytesPerSec = 0.0,
+                    etaSeconds = 0L,
                     status = TransferStatus.COMPLETED,
                     payloadType = payloadType,
                     payloadText = payloadText
@@ -517,9 +560,22 @@ object TransferEngine {
 
             var totalReceived = totalResumed
             val totalBytes = manifest.totalBytes
+            val startTime = System.currentTimeMillis()
 
             try {
                 while (true) {
+                    if (isTransferCancelled(manifest.transferId)) {
+                        cancelledTransfers.remove(manifest.transferId)
+                        val cancelErr = NearsideError(
+                            code = NearsideErrorCode.TRANSFER_INTERRUPTED,
+                            operation = "handleInboundConnection",
+                            message = "Inbound transfer cancelled by user",
+                            correlationId = manifest.transferId
+                        )
+                        NearsideLogger.info("transfer", "handleInboundConnection", "Inbound transfer aborted due to user cancellation", state = "cancelled", correlationId = manifest.transferId)
+                        return@withContext Result.failure(cancelErr)
+                    }
+
                     val chunkMagic = input.readInt()
                     if (chunkMagic != TransferChunk.MAGIC) break
 
@@ -558,7 +614,18 @@ object TransferEngine {
 
                     totalReceived += payloadLen
                     val frac = if (totalBytes > 0) totalReceived.toFloat() / totalBytes else 1.0f
-                    record = record.copy(progress = frac)
+
+                    val elapsedSec = (System.currentTimeMillis() - startTime) / 1000.0
+                    val bytesReceivedThisSession = totalReceived - totalResumed
+                    val speed = if (elapsedSec > 0.1) bytesReceivedThisSession / elapsedSec else 0.0
+                    val remainingBytes = (totalBytes - totalReceived).coerceAtLeast(0L)
+                    val eta = if (speed > 0) (remainingBytes / speed).toLong() else null
+
+                    record = record.copy(
+                        progress = frac,
+                        speedBytesPerSec = speed,
+                        etaSeconds = eta
+                    )
                     onProgress(frac, record)
                 }
 
@@ -591,6 +658,8 @@ object TransferEngine {
 
                 record = record.copy(
                     progress = 1.0f,
+                    speedBytesPerSec = 0.0,
+                    etaSeconds = 0L,
                     status = TransferStatus.COMPLETED,
                     payloadType = payloadType,
                     payloadText = payloadText

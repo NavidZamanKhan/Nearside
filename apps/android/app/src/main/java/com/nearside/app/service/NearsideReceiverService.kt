@@ -8,9 +8,11 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.FileProvider
 import com.nearside.app.R
 import com.nearside.app.crypto.PinnedTrustStore
 import com.nearside.app.diagnostics.*
@@ -24,6 +26,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.net.ServerSocket
 import java.util.UUID
 
@@ -31,12 +34,18 @@ class NearsideReceiverService : Service() {
 
     companion object {
         const val CHANNEL_ID = "nearside_receiver_channel"
+        const val TRANSFER_CHANNEL_ID = "nearside_transfers_channel"
         const val NOTIFICATION_ID = 2001
+        const val TRANSFER_NOTIFICATION_ID = 2002
+        const val COMPLETION_NOTIFICATION_ID = 2003
 
         const val ACTION_START = "com.nearside.app.action.START"
         const val ACTION_STOP = "com.nearside.app.action.STOP"
         const val ACTION_PAUSE = "com.nearside.app.action.PAUSE"
         const val ACTION_RESUME = "com.nearside.app.action.RESUME"
+        const val ACTION_CANCEL_TRANSFER = "com.nearside.app.action.CANCEL_TRANSFER"
+
+        const val EXTRA_TRANSFER_ID = "com.nearside.app.extra.TRANSFER_ID"
 
         @Volatile
         var isReceiving: Boolean = true
@@ -66,6 +75,14 @@ class NearsideReceiverService : Service() {
             }
             context.startService(intent)
         }
+
+        fun cancelActiveTransfer(context: Context, transferId: String) {
+            val intent = Intent(context, NearsideReceiverService::class.java).apply {
+                action = ACTION_CANCEL_TRANSFER
+                putExtra(EXTRA_TRANSFER_ID, transferId)
+            }
+            context.startService(intent)
+        }
     }
 
     private lateinit var powerLockManager: PowerLockManager
@@ -75,7 +92,7 @@ class NearsideReceiverService : Service() {
     override fun onCreate() {
         super.onCreate()
         powerLockManager = PowerLockManager(this)
-        createNotificationChannel()
+        createNotificationChannels()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -83,11 +100,22 @@ class NearsideReceiverService : Service() {
             ACTION_PAUSE -> {
                 isReceiving = false
                 powerLockManager.releaseAll()
+                stopTcpListener()
                 updateNotification(isPaused = true)
+                NearsideTileService.requestTileUpdate(this)
             }
             ACTION_RESUME -> {
                 isReceiving = true
+                startTcpListener()
                 updateNotification(isPaused = false)
+                NearsideTileService.requestTileUpdate(this)
+            }
+            ACTION_CANCEL_TRANSFER -> {
+                val tid = intent.getStringExtra(EXTRA_TRANSFER_ID)
+                if (tid != null) {
+                    TransferEngine.cancelTransfer(tid)
+                }
+                clearTransferNotification()
             }
             ACTION_STOP -> {
                 isReceiving = false
@@ -95,6 +123,7 @@ class NearsideReceiverService : Service() {
                 stopTcpListener()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                NearsideTileService.requestTileUpdate(this)
                 return START_NOT_STICKY
             }
             else -> {
@@ -110,6 +139,7 @@ class NearsideReceiverService : Service() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
                 startTcpListener()
+                NearsideTileService.requestTileUpdate(this)
             }
         }
 
@@ -147,19 +177,24 @@ class NearsideReceiverService : Service() {
                                     socket = client,
                                     trustStore = trustStore,
                                     destinationDir = destDir,
-                                    onProgress = { progress, record ->
-                                        updateTransferProgressNotification(record.filename, progress)
+                                    onProgress = { _, record ->
+                                        updateTransferProgressNotification(record)
                                     }
                                 )
                                 result.onSuccess { record ->
+                                    clearTransferNotification()
                                     if (record.payloadText != null) {
                                         handleReceivedTextPayload(record)
+                                    } else {
+                                        handleReceivedFilePayload(record, destDir)
                                     }
+                                }.onFailure {
+                                    clearTransferNotification()
                                 }
                             } finally {
                                 powerLockManager.release(transferTag)
                                 if (powerLockManager.activeCount == 0) {
-                                    updateNotification(isPaused = false)
+                                    updateNotification(isPaused = !isReceiving)
                                 }
                             }
                         }
@@ -208,9 +243,11 @@ class NearsideReceiverService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val manager = getSystemService(NotificationManager::class.java)
+
+            val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.receiving_channel_name),
                 NotificationManager.IMPORTANCE_LOW
@@ -218,18 +255,28 @@ class NearsideReceiverService : Service() {
                 description = getString(R.string.receiving_channel_desc)
                 setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+
+            val transferChannel = NotificationChannel(
+                TRANSFER_CHANNEL_ID,
+                getString(R.string.transfer_channel_name),
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = getString(R.string.transfer_channel_desc)
+                setShowBadge(true)
+            }
+
+            manager.createNotificationChannel(serviceChannel)
+            manager.createNotificationChannel(transferChannel)
         }
     }
 
     private fun updateNotification(isPaused: Boolean) {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(isPaused))
+        manager?.notify(NOTIFICATION_ID, buildNotification(isPaused))
     }
 
-    private fun updateTransferProgressNotification(filename: String, progress: Float) {
-        val pct = (progress * 100).toInt().coerceIn(0, 100)
+    private fun updateTransferProgressNotification(record: TransferRecord) {
+        val pct = (record.progress * 100).toInt().coerceIn(0, 100)
         val openIntent = Intent(this, MainActivity::class.java)
         val contentPendingIntent = PendingIntent.getActivity(
             this,
@@ -238,18 +285,79 @@ class NearsideReceiverService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val cancelIntent = Intent(this, NearsideReceiverService::class.java).apply {
+            action = ACTION_CANCEL_TRANSFER
+            putExtra(EXTRA_TRANSFER_ID, record.id)
+        }
+        val cancelPendingIntent = PendingIntent.getService(
+            this,
+            record.id.hashCode(),
+            cancelIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val speedText = record.formattedSpeed
+        val etaText = record.formattedEta
+        val details = listOfNotNull(
+            "$pct%",
+            if (speedText.isNotEmpty()) speedText else null,
+            if (etaText.isNotEmpty()) etaText else null
+        ).joinToString(" • ")
+
+        val notification = NotificationCompat.Builder(this, TRANSFER_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_nearside)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText("Receiving $filename ($pct%)")
+            .setContentTitle("Receiving ${record.filename}")
+            .setContentText(details)
             .setProgress(100, pct, false)
             .setContentIntent(contentPendingIntent)
             .setOngoing(true)
+            .addAction(0, getString(R.string.action_cancel), cancelPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
         val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_ID, notification)
+        manager?.notify(TRANSFER_NOTIFICATION_ID, notification)
+    }
+
+    private fun clearTransferNotification() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.cancel(TRANSFER_NOTIFICATION_ID)
+    }
+
+    private fun handleReceivedFilePayload(record: TransferRecord, destDir: File) {
+        val file = File(destDir, record.filename)
+        if (!file.exists()) return
+
+        val manager = getSystemService(NotificationManager::class.java)
+        val notifBuilder = NotificationCompat.Builder(this, TRANSFER_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_nearside)
+            .setContentTitle(getString(R.string.transfer_complete))
+            .setContentText("${record.filename} (${record.formattedSize})")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+
+        try {
+            val contentUri: Uri = FileProvider.getUriForFile(
+                this,
+                "${applicationContext.packageName}.fileprovider",
+                file
+            )
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(contentUri, contentResolver.getType(contentUri) ?: "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val openPendingIntent = PendingIntent.getActivity(
+                this,
+                UUID.randomUUID().hashCode(),
+                viewIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            notifBuilder.setContentIntent(openPendingIntent)
+            notifBuilder.addAction(0, getString(R.string.action_open), openPendingIntent)
+        } catch (ignored: Exception) {}
+
+        manager?.notify(COMPLETION_NOTIFICATION_ID, notifBuilder.build())
     }
 
     private fun handleReceivedTextPayload(record: TransferRecord) {
@@ -259,7 +367,7 @@ class NearsideReceiverService : Service() {
         clipboard?.setPrimaryClip(clip)
 
         val manager = getSystemService(NotificationManager::class.java)
-        val notifBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val notifBuilder = NotificationCompat.Builder(this, TRANSFER_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_nearside)
             .setContentTitle(if (record.payloadType == PayloadType.URL) "Link Copied to Clipboard" else "Text Copied to Clipboard")
             .setContentText(if (text.length > 50) text.take(50) + "..." else text)
@@ -268,7 +376,7 @@ class NearsideReceiverService : Service() {
 
         if (record.payloadType == PayloadType.URL) {
             try {
-                val openIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(text)).apply {
+                val openIntent = Intent(Intent.ACTION_VIEW, Uri.parse(text)).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 val pi = PendingIntent.getActivity(
@@ -281,7 +389,7 @@ class NearsideReceiverService : Service() {
             } catch (ignored: Exception) {}
         }
 
-        manager?.notify(NOTIFICATION_ID + 1, notifBuilder.build())
+        manager?.notify(COMPLETION_NOTIFICATION_ID + 1, notifBuilder.build())
     }
 
     private fun buildNotification(isPaused: Boolean): Notification {

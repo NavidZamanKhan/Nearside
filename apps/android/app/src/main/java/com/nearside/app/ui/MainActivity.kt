@@ -8,6 +8,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
@@ -30,15 +31,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QrCode
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +59,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -67,7 +75,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -78,6 +85,7 @@ import com.nearside.app.model.NearsideDevice
 import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
+import com.nearside.app.model.TransferStatus
 import com.nearside.app.service.NearsideReceiverService
 import com.nearside.app.state.AppViewModel
 import com.nearside.app.state.NearsideUiState
@@ -111,6 +119,7 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     uiState = uiState,
                     onToggleReceiving = { viewModel.toggleReceiving(this) },
+                    onCancelTransfer = { viewModel.cancelTransfer(it) },
                     onUnpair = { viewModel.unpairDevice(it) },
                     onPairWithCode = { viewModel.pairWithCode(it) },
                     onPairWithQrUri = { viewModel.pairWithQrUri(it) },
@@ -149,6 +158,7 @@ class MainActivity : ComponentActivity() {
 fun MainScreen(
     uiState: NearsideUiState,
     onToggleReceiving: () -> Unit,
+    onCancelTransfer: (String) -> Unit,
     onUnpair: (String) -> Unit,
     onPairWithCode: (String) -> Unit,
     onPairWithQrUri: (String) -> Boolean,
@@ -162,6 +172,15 @@ fun MainScreen(
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.isNotEmpty() && targetDeviceForPicker != null) {
+            onSendFiles(targetDeviceForPicker!!, uris)
+            targetDeviceForPicker = null
+        }
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
         if (uris.isNotEmpty() && targetDeviceForPicker != null) {
             onSendFiles(targetDeviceForPicker!!, uris)
@@ -189,10 +208,19 @@ fun MainScreen(
                     }
                 },
                 actions = {
-                    ReceivingStatusBadge(
-                        isActive = uiState.isReceivingActive,
-                        onClick = onToggleReceiving
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.padding(end = 12.dp)
+                    ) {
+                        Text(
+                            text = "${uiState.localIpAddress}:${uiState.localPort}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
@@ -209,7 +237,7 @@ fun MainScreen(
         ) {
             item { Spacer(modifier = Modifier.height(4.dp)) }
 
-            // Toast / Feedback banner
+            // Feedback / Toast Banner
             uiState.toastMessage?.let { toast ->
                 item {
                     Card(
@@ -228,11 +256,37 @@ fun MainScreen(
                 }
             }
 
-            // Active Transfer Section (if any)
+            // Hero Control Center Receiving Mode Card
+            item {
+                ControlCenterHeroCard(
+                    isReceivingActive = uiState.isReceivingActive,
+                    onToggle = onToggleReceiving
+                )
+            }
+
+            // In-flight Velocity Tracker Card
             uiState.activeTransfer?.let { transfer ->
                 item {
-                    ActiveTransferCard(transfer = transfer)
+                    ActiveTransferCard(
+                        transfer = transfer,
+                        onCancel = { onCancelTransfer(transfer.id) }
+                    )
                 }
+            }
+
+            // Direct Media Dispatch Bar
+            item {
+                DirectActionsRow(
+                    onPickFiles = {
+                        targetDeviceForPicker = uiState.pairedDevices.firstOrNull()
+                        filePickerLauncher.launch("*/*")
+                    },
+                    onPickPhotos = {
+                        targetDeviceForPicker = uiState.pairedDevices.firstOrNull()
+                        photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    },
+                    onShowPairing = { showQrDialog = true }
+                )
             }
 
             // Local Identity Card
@@ -244,7 +298,7 @@ fun MainScreen(
                 )
             }
 
-            // Discovered / Paired Peers Section
+            // Available Peers Section
             item {
                 Text(
                     text = "AVAILABLE PEERS",
@@ -278,9 +332,13 @@ fun MainScreen(
                 items(uiState.pairedDevices, key = { it.id }) { device ->
                     DeviceRowCard(
                         device = device,
-                        onSendClick = {
+                        onSendFilesClick = {
                             targetDeviceForPicker = device
                             filePickerLauncher.launch("*/*")
+                        },
+                        onSendPhotosClick = {
+                            targetDeviceForPicker = device
+                            photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                         },
                         onBeamClipboard = { onBeamClipboard(device) },
                         onUnpairClick = { onUnpair(device.id) }
@@ -352,69 +410,230 @@ fun MainScreen(
 }
 
 @Composable
-fun ReceivingStatusBadge(isActive: Boolean, onClick: () -> Unit) {
-    Surface(
-        modifier = Modifier
-            .padding(end = 12.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
-        color = if (isActive) NearsideGreen.copy(alpha = 0.15f) else NearsideAmber.copy(alpha = 0.15f)
+fun ControlCenterHeroCard(
+    isReceivingActive: Boolean,
+    onToggle: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isReceivingActive)
+                NearsideGreen.copy(alpha = 0.10f)
+            else
+                MaterialTheme.colorScheme.surfaceVariant
+        )
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Icon(
-                imageVector = if (isActive) Icons.Default.PlayArrow else Icons.Default.Pause,
-                contentDescription = null,
-                tint = if (isActive) NearsideGreen else NearsideAmber,
-                modifier = Modifier.size(14.dp)
-            )
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isReceivingActive)
+                                    NearsideGreen.copy(alpha = 0.20f)
+                                else
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.20f)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isReceivingActive) Icons.Default.WifiTethering else Icons.Default.PowerSettingsNew,
+                            contentDescription = null,
+                            tint = if (isReceivingActive) NearsideGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(14.dp))
+
+                    Column {
+                        Text(
+                            text = if (isReceivingActive) "Receiving Ready" else "Dormant (Off)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (isReceivingActive) "Port 41433 • Broadcasting mDNS" else "Zero battery • Sockets closed",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Switch(
+                    checked = isReceivingActive,
+                    onCheckedChange = { onToggle() },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = NearsideGreen
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             Text(
-                text = if (isActive) "Receiving" else "Paused",
-                color = if (isActive) NearsideGreen else NearsideAmber,
+                text = if (isReceivingActive)
+                    "Nearside is receptive to inbound files and clipboard beaming from trusted peers on this network."
+                else
+                    "Receiving is turned off to save battery and memory. Outbound sending remains available anytime.",
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
 }
 
 @Composable
-fun ActiveTransferCard(transfer: TransferRecord) {
+fun DirectActionsRow(
+    onPickFiles: () -> Unit,
+    onPickPhotos: () -> Unit,
+    onShowPairing: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        OutlinedButton(
+            onClick = onPickFiles,
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text = "Files", fontSize = 12.sp)
+        }
+
+        OutlinedButton(
+            onClick = onPickPhotos,
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text = "Photos", fontSize = 12.sp)
+        }
+
+        Button(
+            onClick = onShowPairing,
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
+        ) {
+            Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text = "Pair", fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+fun ActiveTransferCard(
+    transfer: TransferRecord,
+    onCancel: () -> Unit
+) {
+    val isIncoming = transfer.direction == TransferDirection.INCOMING
+    val speedText = transfer.formattedSpeed
+    val etaText = transfer.formattedEta
+
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Sending to ${transfer.deviceName}...",
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(if (isIncoming) NearsideGreen.copy(alpha = 0.2f) else NearsideBlue.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isIncoming) Icons.AutoMirrored.Filled.ArrowBack else Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = null,
+                            tint = if (isIncoming) NearsideGreen else NearsideBlue,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = if (isIncoming) "Receiving from ${transfer.deviceName}..." else "Sending to ${transfer.deviceName}...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${transfer.filename} (${transfer.formattedSize})",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
                 Text(
                     text = "${(transfer.progress * 100).toInt()}%",
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
                     color = NearsideBlue
                 )
             }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = transfer.filename,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             LinearProgressIndicator(
                 progress = { transfer.progress },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp))
             )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (speedText.isNotEmpty()) {
+                        Icon(Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(text = speedText, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.width(12.dp))
+                    }
+                    if (etaText.isNotEmpty()) {
+                        Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(text = etaText, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onCancel,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(12.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "Cancel", fontSize = 11.sp)
+                }
+            }
         }
     }
 }
@@ -427,6 +646,7 @@ fun IdentityCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -446,19 +666,14 @@ fun IdentityCard(
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text(
-                text = "IP: ${uiState.localIpAddress}:${uiState.localPort}",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
 
             Spacer(modifier = Modifier.height(14.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = onShowQr,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp)
                 ) {
                     Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
@@ -468,6 +683,7 @@ fun IdentityCard(
                 Button(
                     onClick = onEnterCode,
                     modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
                 ) {
                     Text(text = "Pair Code", fontSize = 12.sp)
@@ -480,70 +696,126 @@ fun IdentityCard(
 @Composable
 fun DeviceRowCard(
     device: NearsideDevice,
-    onSendClick: () -> Unit,
+    onSendFilesClick: () -> Unit,
+    onSendPhotosClick: () -> Unit,
     onBeamClipboard: () -> Unit,
     onUnpairClick: () -> Unit
 ) {
+    val platformColor = when (device.platform) {
+        DevicePlatform.MACOS -> NearsideBlue
+        DevicePlatform.ANDROID -> NearsideGreen
+        DevicePlatform.IOS -> Color(0xFF8B5CF6)
+        DevicePlatform.WINDOWS -> Color(0xFF0284C7)
+        DevicePlatform.LINUX -> Color(0xFFEA580C)
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(NearsideBlue.copy(alpha = 0.15f)),
-                contentAlignment = Alignment.Center
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = if (device.platform == DevicePlatform.MACOS) Icons.Default.Computer else Icons.Default.Smartphone,
-                    contentDescription = null,
-                    tint = NearsideBlue,
-                    modifier = Modifier.size(20.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(platformColor.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (device.platform == DevicePlatform.MACOS || device.platform == DevicePlatform.WINDOWS || device.platform == DevicePlatform.LINUX)
+                            Icons.Default.Computer
+                        else
+                            Icons.Default.Smartphone,
+                        contentDescription = null,
+                        tint = platformColor,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = device.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = platformColor.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = device.platform.displayName,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = platformColor,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "${device.shortFingerprint} • ${device.ipAddress ?: "Direct"}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                IconButton(
+                    onClick = onUnpairClick,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        Icons.Default.DeleteOutline,
+                        contentDescription = "Unpair",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = device.name,
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    text = "${device.platform.displayName} • ${device.shortFingerprint}",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            IconButton(
-                onClick = onBeamClipboard,
-                modifier = Modifier.size(36.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    Icons.Default.ContentPaste,
-                    contentDescription = "Beam Clipboard",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
+                OutlinedButton(
+                    onClick = onSendFilesClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "Send File", fontSize = 11.sp)
+                }
 
-            Spacer(modifier = Modifier.width(4.dp))
+                OutlinedButton(
+                    onClick = onSendPhotosClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "Photos", fontSize = 11.sp)
+                }
 
-            Button(
-                onClick = onSendClick,
-                colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(text = "Send", fontSize = 12.sp)
+                Button(
+                    onClick = onBeamClipboard,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
+                ) {
+                    Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "Beam", fontSize = 11.sp)
+                }
             }
         }
     }
@@ -560,14 +832,25 @@ fun TransferRow(record: TransferRecord) {
         val isIncoming = record.direction == TransferDirection.INCOMING
         val isUrl = record.payloadType == PayloadType.URL
         val isText = record.payloadType == PayloadType.TEXT
+        val isFailed = record.status == TransferStatus.FAILED
+        val isCancelled = record.status == TransferStatus.CANCELLED
+
+        val badgeColor = when {
+            isFailed -> MaterialTheme.colorScheme.error
+            isCancelled -> NearsideAmber
+            isIncoming -> NearsideGreen
+            else -> NearsideBlue
+        }
+
         Box(
             modifier = Modifier
-                .size(32.dp)
+                .size(34.dp)
                 .clip(CircleShape)
-                .background(if (isIncoming) NearsideGreen.copy(alpha = 0.15f) else NearsideBlue.copy(alpha = 0.15f)),
+                .background(badgeColor.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center
         ) {
             val iconVector = when {
+                isCancelled -> Icons.Default.Close
                 isUrl -> Icons.Default.Link
                 isText -> Icons.Default.ContentPaste
                 isIncoming -> Icons.AutoMirrored.Filled.ArrowBack
@@ -576,7 +859,7 @@ fun TransferRow(record: TransferRecord) {
             Icon(
                 imageVector = iconVector,
                 contentDescription = null,
-                tint = if (isIncoming) NearsideGreen else NearsideBlue,
+                tint = badgeColor,
                 modifier = Modifier.size(16.dp)
             )
         }
@@ -594,6 +877,34 @@ fun TransferRow(record: TransferRecord) {
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+
+        if (isCancelled) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = NearsideAmber.copy(alpha = 0.15f)
+            ) {
+                Text(
+                    text = "Cancelled",
+                    color = NearsideAmber,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        } else if (isFailed) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+            ) {
+                Text(
+                    text = "Failed",
+                    color = MaterialTheme.colorScheme.error,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
         }
     }
 }

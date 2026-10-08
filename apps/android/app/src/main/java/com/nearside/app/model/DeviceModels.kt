@@ -61,6 +61,8 @@ data class TransferRecord(
     val fileCount: Int = 1,
     val totalSizeBytes: Long,
     val progress: Float = 1.0f,
+    val speedBytesPerSec: Double = 0.0,
+    val etaSeconds: Long? = null,
     val status: TransferStatus = TransferStatus.COMPLETED,
     val timestamp: Long = System.currentTimeMillis(),
     val payloadType: PayloadType = PayloadType.FILE,
@@ -69,6 +71,28 @@ data class TransferRecord(
     val errorMessage: String? = null,
     val correlationId: String? = null
 ) {
+    val formattedSpeed: String
+        get() {
+            if (speedBytesPerSec <= 0.0) return ""
+            val mbps = speedBytesPerSec / (1024.0 * 1024.0)
+            return if (mbps >= 1.0) {
+                String.format("%.1f MB/s", mbps)
+            } else {
+                String.format("%.0f KB/s", speedBytesPerSec / 1024.0)
+            }
+        }
+
+    val formattedEta: String
+        get() {
+            val s = etaSeconds ?: return ""
+            if (s <= 0) return "Almost done"
+            return if (s < 60) {
+                "${s}s remaining"
+            } else {
+                "${s / 60}m ${s % 60}s remaining"
+            }
+        }
+
     val formattedSize: String
         get() {
             val kb = totalSizeBytes / 1024.0

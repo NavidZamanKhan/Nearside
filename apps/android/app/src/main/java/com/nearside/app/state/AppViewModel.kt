@@ -99,41 +99,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     reachability = DeviceReachability.ONLINE
                 ),
                 NearsideDevice(
-                    id = "dev_ipad_air",
-                    name = "iPad Air",
-                    platform = DevicePlatform.IOS,
-                    fingerprint = "ns1_c5e891b00142fa9166da23491f08cb34",
+                    id = "dev_pixel_9",
+                    name = "Pixel 9 Pro",
+                    platform = DevicePlatform.ANDROID,
+                    fingerprint = "ns1_47c2fe8910ab3d5e6721984251cd0112",
                     ipAddress = "192.168.0.108",
                     port = 41433,
-                    reachability = DeviceReachability.UNREACHABLE
+                    reachability = DeviceReachability.ONLINE
+                ),
+                NearsideDevice(
+                    id = "dev_iphone_16",
+                    name = "iPhone 16 Pro",
+                    platform = DevicePlatform.IOS,
+                    fingerprint = "ns1_83f1cd5678ab432190123456789abcde",
+                    ipAddress = "192.168.0.112",
+                    port = 41433,
+                    reachability = DeviceReachability.ONLINE
                 )
             )
         }
 
         val initialTransfers = listOf(
             TransferRecord(
-                id = "tx_101",
                 deviceName = "MacBook Pro",
                 devicePlatform = DevicePlatform.MACOS,
                 direction = TransferDirection.INCOMING,
-                filename = "presentation_final.pdf",
-                fileCount = 1,
-                totalSizeBytes = 14_850_000,
+                filename = "ClientPresentation.pdf",
+                totalSizeBytes = 18_400_000,
                 progress = 1.0f,
                 status = TransferStatus.COMPLETED,
-                timestamp = System.currentTimeMillis() - 1800_000
+                timestamp = System.currentTimeMillis() - 600000
             ),
             TransferRecord(
-                id = "tx_102",
-                deviceName = "MacBook Pro",
-                devicePlatform = DevicePlatform.MACOS,
+                deviceName = "iPhone 16 Pro",
+                devicePlatform = DevicePlatform.IOS,
                 direction = TransferDirection.OUTGOING,
-                filename = "camera_roll_01.mp4",
+                filename = "https://github.com/nearside/app",
                 fileCount = 1,
-                totalSizeBytes = 84_300_000,
+                totalSizeBytes = 32,
                 progress = 1.0f,
                 status = TransferStatus.COMPLETED,
-                timestamp = System.currentTimeMillis() - 7200_000
+                payloadType = PayloadType.URL,
+                payloadText = "https://github.com/nearside/app",
+                timestamp = System.currentTimeMillis() - 1200000
             )
         )
 
@@ -176,11 +184,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
         } else {
             NearsideReceiverService.pause(context)
-            nsdDiscovery.startAdvertising(
-                identity = deviceIdentity.publicIdentity,
-                deviceName = _uiState.value.localDeviceName,
-                port = _uiState.value.localPort,
-                isReceiving = false
+            nsdDiscovery.stopAdvertising()
+        }
+    }
+
+    fun cancelTransfer(transferId: String) {
+        com.nearside.app.transfer.TransferEngine.cancelTransfer(transferId)
+        NearsideReceiverService.cancelActiveTransfer(context, transferId)
+        _uiState.update { current ->
+            val cancelled = current.activeTransfer?.let {
+                if (it.id == transferId) {
+                    it.copy(
+                        status = TransferStatus.CANCELLED,
+                        errorMessage = "Transfer cancelled by user"
+                    )
+                } else null
+            }
+            current.copy(
+                activeTransfer = null,
+                recentTransfers = if (cancelled != null) listOf(cancelled) + current.recentTransfers else current.recentTransfers
             )
         }
     }
@@ -250,6 +272,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             fileCount = files.size,
             totalSizeBytes = totalBytes,
             progress = 0.05f,
+            speedBytesPerSec = 0.0,
+            etaSeconds = null,
             status = TransferStatus.TRANSFERRING
         )
         _uiState.update { it.copy(activeTransfer = record) }
@@ -262,10 +286,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     host = host,
                     port = device.port ?: 41433,
                     senderId = deviceIdentity.publicIdentity,
-                    onProgress = { frac, _, _ ->
+                    onProgress = { frac, _, _ -> },
+                    onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                         _uiState.update { current ->
                             current.activeTransfer?.let {
-                                current.copy(activeTransfer = it.copy(progress = frac))
+                                current.copy(
+                                    activeTransfer = it.copy(
+                                        progress = frac,
+                                        speedBytesPerSec = speed,
+                                        etaSeconds = eta
+                                    )
+                                )
                             } ?: current
                         }
                     }
@@ -274,12 +305,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { current ->
                     val failureException = res.exceptionOrNull()
                     val nearsideErr = failureException as? com.nearside.app.diagnostics.NearsideError
+                    val isCancelled = current.activeTransfer?.status == TransferStatus.CANCELLED ||
+                            com.nearside.app.transfer.TransferEngine.isTransferCancelled(record.id)
+                    val status = when {
+                        isCancelled -> TransferStatus.CANCELLED
+                        res.isSuccess -> TransferStatus.COMPLETED
+                        else -> TransferStatus.FAILED
+                    }
                     val errorCode = nearsideErr?.code?.code ?: (if (res.isSuccess) null else com.nearside.app.diagnostics.NearsideErrorCode.TRANSFER_INTERRUPTED.code)
                     val errorMessage = failureException?.message
 
                     val finished = current.activeTransfer?.copy(
-                        progress = 1.0f,
-                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED,
+                        progress = if (res.isSuccess) 1.0f else current.activeTransfer.progress,
+                        speedBytesPerSec = 0.0,
+                        etaSeconds = 0L,
+                        status = status,
                         errorCode = errorCode,
                         errorMessage = errorMessage,
                         correlationId = current.activeTransfer.id
@@ -307,24 +347,40 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             filename = filenames.firstOrNull() ?: "Document",
             fileCount = filenames.size,
             totalSizeBytes = totalBytes,
-            progress = 0.1f,
+            progress = 0.05f,
+            speedBytesPerSec = 38_500_000.0,
+            etaSeconds = 6L,
             status = TransferStatus.TRANSFERRING
         )
 
         _uiState.update { it.copy(activeTransfer = record) }
 
         viewModelScope.launch {
-            for (i in 1..10) {
+            val totalSteps = 10
+            for (i in 1..totalSteps) {
                 delay(200)
+                if (com.nearside.app.transfer.TransferEngine.isTransferCancelled(record.id)) {
+                    return@launch
+                }
+                val frac = i / totalSteps.toFloat()
+                val remainingSec = ((totalSteps - i) * 0.25).toLong()
                 _uiState.update { current ->
                     current.activeTransfer?.let {
-                        current.copy(activeTransfer = it.copy(progress = i / 10.0f))
+                        current.copy(
+                            activeTransfer = it.copy(
+                                progress = frac,
+                                speedBytesPerSec = 35_000_000.0 + (i * 1_200_000.0),
+                                etaSeconds = remainingSec
+                            )
+                        )
                     } ?: current
                 }
             }
             _uiState.update { current ->
                 val finished = current.activeTransfer?.copy(
                     progress = 1.0f,
+                    speedBytesPerSec = 0.0,
+                    etaSeconds = 0L,
                     status = TransferStatus.COMPLETED
                 )
                 val updatedHistory = if (finished != null) {
@@ -368,6 +424,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             fileCount = 1,
             totalSizeBytes = text.toByteArray(Charsets.UTF_8).size.toLong(),
             progress = 0.05f,
+            speedBytesPerSec = 0.0,
+            etaSeconds = null,
             status = TransferStatus.TRANSFERRING,
             payloadType = if (isUrl) PayloadType.URL else PayloadType.TEXT,
             payloadText = text
@@ -383,10 +441,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     host = host,
                     port = device.port ?: 41433,
                     senderId = deviceIdentity.publicIdentity,
-                    onProgress = { frac, _, _ ->
+                    onProgress = { frac, _, _ -> },
+                    onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                         _uiState.update { current ->
                             current.activeTransfer?.let {
-                                current.copy(activeTransfer = it.copy(progress = frac))
+                                current.copy(
+                                    activeTransfer = it.copy(
+                                        progress = frac,
+                                        speedBytesPerSec = speed,
+                                        etaSeconds = eta
+                                    )
+                                )
                             } ?: current
                         }
                     }
@@ -395,12 +460,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { current ->
                     val failureException = res.exceptionOrNull()
                     val nearsideErr = failureException as? com.nearside.app.diagnostics.NearsideError
+                    val isCancelled = com.nearside.app.transfer.TransferEngine.isTransferCancelled(record.id)
+                    val status = when {
+                        isCancelled -> TransferStatus.CANCELLED
+                        res.isSuccess -> TransferStatus.COMPLETED
+                        else -> TransferStatus.FAILED
+                    }
                     val errorCode = nearsideErr?.code?.code ?: (if (res.isSuccess) null else com.nearside.app.diagnostics.NearsideErrorCode.TRANSFER_INTERRUPTED.code)
                     val errorMessage = failureException?.message
 
                     val finished = current.activeTransfer?.copy(
                         progress = 1.0f,
-                        status = if (res.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED,
+                        speedBytesPerSec = 0.0,
+                        etaSeconds = 0L,
+                        status = status,
                         errorCode = errorCode,
                         errorMessage = errorMessage,
                         correlationId = current.activeTransfer.id

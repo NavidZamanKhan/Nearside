@@ -304,4 +304,30 @@ class TransferEngineTest {
         assertEquals(content.size.toLong(), partialDestFile.length())
         assertTrue(content.contentEquals(partialDestFile.readBytes()))
     }
+
+    @Test
+    fun testTransferRecordFormatting() {
+        val record = com.nearside.app.model.TransferRecord(
+            deviceName = "MacBook Pro",
+            devicePlatform = com.nearside.app.model.DevicePlatform.MACOS,
+            direction = com.nearside.app.model.TransferDirection.OUTGOING,
+            filename = "Video.mp4",
+            totalSizeBytes = 52_428_800L,
+            progress = 0.5f,
+            speedBytesPerSec = 26_214_400.0,
+            etaSeconds = 2L
+        )
+
+        assertEquals("50.0 MB", record.formattedSize)
+        assertEquals("25.0 MB/s", record.formattedSpeed)
+        assertEquals("2s remaining", record.formattedEta)
+    }
+
+    @Test
+    fun testTransferCancellation() {
+        val transferId = "tx_test_cancel_9876"
+        assertFalse(TransferEngine.isTransferCancelled(transferId))
+        TransferEngine.cancelTransfer(transferId)
+        assertTrue(TransferEngine.isTransferCancelled(transferId))
+    }
 }
