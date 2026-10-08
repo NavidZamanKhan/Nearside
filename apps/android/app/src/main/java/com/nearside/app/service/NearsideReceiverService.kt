@@ -33,7 +33,7 @@ import java.util.UUID
 class NearsideReceiverService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "nearside_receiver_channel"
+        const val CHANNEL_ID = "nearside_status_channel_v2"
         const val TRANSFER_CHANNEL_ID = "nearside_transfers_channel"
         const val NOTIFICATION_ID = 2001
         const val TRANSFER_NOTIFICATION_ID = 2002
@@ -43,6 +43,7 @@ class NearsideReceiverService : Service() {
         const val ACTION_STOP = "com.nearside.app.action.STOP"
         const val ACTION_PAUSE = "com.nearside.app.action.PAUSE"
         const val ACTION_RESUME = "com.nearside.app.action.RESUME"
+        const val ACTION_REFRESH = "com.nearside.app.action.REFRESH"
         const val ACTION_CANCEL_TRANSFER = "com.nearside.app.action.CANCEL_TRANSFER"
 
         const val EXTRA_TRANSFER_ID = "com.nearside.app.extra.TRANSFER_ID"
@@ -60,6 +61,13 @@ class NearsideReceiverService : Service() {
             } else {
                 context.startService(intent)
             }
+        }
+
+        fun refresh(context: Context) {
+            val intent = Intent(context, NearsideReceiverService::class.java).apply {
+                action = ACTION_REFRESH
+            }
+            context.startService(intent)
         }
 
         fun pause(context: Context) {
@@ -109,6 +117,9 @@ class NearsideReceiverService : Service() {
                 startTcpListener()
                 updateNotification(isPaused = false)
                 NearsideTileService.requestTileUpdate(this)
+            }
+            ACTION_REFRESH -> {
+                updateNotification(isPaused = !isReceiving)
             }
             ACTION_CANCEL_TRANSFER -> {
                 val tid = intent.getStringExtra(EXTRA_TRANSFER_ID)
@@ -250,16 +261,16 @@ class NearsideReceiverService : Service() {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.receiving_channel_name),
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = getString(R.string.receiving_channel_desc)
-                setShowBadge(false)
+                setShowBadge(true)
             }
 
             val transferChannel = NotificationChannel(
                 TRANSFER_CHANNEL_ID,
                 getString(R.string.transfer_channel_name),
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = getString(R.string.transfer_channel_desc)
                 setShowBadge(true)
@@ -421,7 +432,7 @@ class NearsideReceiverService : Service() {
             .setContentIntent(contentPendingIntent)
             .setOngoing(true)
             .addAction(0, toggleLabel, togglePendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
     }
 }
