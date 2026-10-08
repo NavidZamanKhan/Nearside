@@ -260,6 +260,28 @@ public final class AppState: ObservableObject {
         pairedDevices.append(newDevice)
     }
 
+    public func pairDiscoveredDevice(_ device: NearsideDevice) {
+        let dummyKey = P256.Signing.PrivateKey().publicKey
+        trustStore.enroll(
+            identity: device.id,
+            name: device.name,
+            platform: device.platform.rawValue,
+            publicKey: dummyKey
+        )
+        let newDevice = NearsideDevice(
+            id: device.id,
+            name: device.name,
+            platform: device.platform,
+            fingerprint: device.fingerprint,
+            ipAddress: device.ipAddress,
+            port: device.port,
+            reachability: .online,
+            lastSeen: Date()
+        )
+        pairedDevices.removeAll { $0.id == device.id }
+        pairedDevices.append(newDevice)
+    }
+
     public func unpairDevice(id: String) {
         pairedDevices.removeAll { $0.id == id }
         trustStore.unpair(identity: id)
@@ -276,6 +298,16 @@ public final class AppState: ObservableObject {
     public func sendFiles(urls: [URL], to device: NearsideDevice) {
         guard !urls.isEmpty else { return }
 
+        var targetDevice = device
+        if targetDevice.ipAddress == nil || targetDevice.ipAddress?.isEmpty == true {
+            if let disc = DiscoveryService.shared.findDiscoveredDevice(identity: device.id) {
+                targetDevice = disc
+            }
+        }
+        if !trustStore.isEnrolled(identity: targetDevice.id) {
+            pairDiscoveredDevice(targetDevice)
+        }
+
         let firstFilename = urls.first?.lastPathComponent ?? "Files"
         let totalBytes = urls.reduce(Int64(0)) { acc, url in
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
@@ -283,8 +315,8 @@ public final class AppState: ObservableObject {
         }
 
         let record = TransferRecord(
-            deviceName: device.name,
-            devicePlatform: device.platform,
+            deviceName: targetDevice.name,
+            devicePlatform: targetDevice.platform,
             direction: .outgoing,
             filename: firstFilename,
             fileCount: urls.count,
@@ -295,14 +327,14 @@ public final class AppState: ObservableObject {
         )
         self.activeTransfer = record
 
-        if let ip = device.ipAddress, !ip.isEmpty {
+        if let ip = targetDevice.ipAddress, !ip.isEmpty {
             DiscoveryService.shared.ensureBrowsingActive()
             var lastSampleTime = Date()
             var lastSampleBytes: Int64 = 0
 
             TransferEngine.shared.sendFiles(
                 files: urls,
-                to: device,
+                to: targetDevice,
                 senderId: localFingerprint,
                 onProgress: { [weak self] fraction, transferred, total in
                     Task { @MainActor in

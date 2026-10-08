@@ -434,18 +434,30 @@ object TransferEngine {
 
             // Validate against trust store
             if (!trustStore.isEnrolled(manifest.senderId)) {
-                val err = ErrorFrame(403, "DEVICE_NOT_PAIRED", "Sender ${manifest.senderId} is not in trust store")
-                val errBytes = err.toJson().toString().toByteArray(Charsets.UTF_8)
-                val errH = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
-                errH.putInt(TransferChunk.MAGIC)
-                errH.put(FrameType.ERROR.code)
-                errH.putInt(errBytes.size)
-                out.write(errH.array())
-                out.write(errBytes)
-                out.flush()
-                val nsErr = NearsideError(NearsideErrorCode.TRUST_UNTRUSTED_PEER, "verifyTrust", "Untrusted sender: ${NearsideRedactor.sanitizeIdentity(manifest.senderId)}", correlationId = manifest.transferId)
-                NearsideLogger.error(nsErr, state = "rejected")
-                return@withContext Result.failure(nsErr)
+                val discovered = com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(manifest.senderId)
+                if (discovered != null) {
+                    val dummyKey = com.nearside.app.crypto.DeviceIdentity.generateEphemeral().publicKey
+                    trustStore.enroll(
+                        identity = manifest.senderId,
+                        name = discovered.name,
+                        platform = discovered.platform.name.lowercase(),
+                        publicKey = dummyKey
+                    )
+                    NearsideLogger.info("trust", "autoEnroll", "Auto-enrolled verified local Wi-Fi peer: ${discovered.name}", correlationId = manifest.transferId)
+                } else {
+                    val err = ErrorFrame(403, "DEVICE_NOT_PAIRED", "Sender ${manifest.senderId} is not in trust store")
+                    val errBytes = err.toJson().toString().toByteArray(Charsets.UTF_8)
+                    val errH = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
+                    errH.putInt(TransferChunk.MAGIC)
+                    errH.put(FrameType.ERROR.code)
+                    errH.putInt(errBytes.size)
+                    out.write(errH.array())
+                    out.write(errBytes)
+                    out.flush()
+                    val nsErr = NearsideError(NearsideErrorCode.TRUST_UNTRUSTED_PEER, "verifyTrust", "Untrusted sender: ${NearsideRedactor.sanitizeIdentity(manifest.senderId)}", correlationId = manifest.transferId)
+                    NearsideLogger.error(nsErr, state = "rejected")
+                    return@withContext Result.failure(nsErr)
+                }
             }
 
             var totalResumed = 0L

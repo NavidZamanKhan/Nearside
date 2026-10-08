@@ -18,6 +18,13 @@ class NsdDiscoveryService(context: Context) {
     companion object {
         private const val TAG = "NearsideNSD"
         private const val SERVICE_TYPE = "_nearside._tcp."
+
+        private val globalDiscoveredDevices = ConcurrentHashMap<String, NearsideDevice>()
+
+        fun findDiscoveredDevice(identity: String): NearsideDevice? {
+            return globalDiscoveredDevices[identity]
+                ?: globalDiscoveredDevices.values.firstOrNull { it.id == identity || it.fingerprint == identity }
+        }
     }
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -136,7 +143,9 @@ class NsdDiscoveryService(context: Context) {
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 Log.i(TAG, "Service lost: ${serviceInfo.serviceName}")
                 NearsideLogger.debug("discovery", "onServiceLost", "Lost service: ${serviceInfo.serviceName}")
-                discoveredMap.remove(serviceInfo.serviceName)
+                discoveredMap.remove(serviceInfo.serviceName)?.let {
+                    globalDiscoveredDevices.remove(it.id)
+                }
                 _discoveredDevices.value = discoveredMap.values.toList()
             }
         }
@@ -193,6 +202,7 @@ class NsdDiscoveryService(context: Context) {
                 )
 
                 discoveredMap[service.serviceName] = device
+                globalDiscoveredDevices[device.id] = device
                 _discoveredDevices.value = discoveredMap.values.toList()
             }
         }

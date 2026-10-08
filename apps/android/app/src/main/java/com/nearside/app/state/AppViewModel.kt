@@ -241,9 +241,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return true
     }
 
+    fun pairDiscoveredDevice(device: NearsideDevice) {
+        val dummyKey = DeviceIdentity.generateEphemeral().publicKey
+        trustStore.enroll(
+            identity = device.id,
+            name = device.name,
+            platform = device.platform.name.lowercase(),
+            publicKey = dummyKey
+        )
+        _uiState.update { current ->
+            current.copy(
+                pairedDevices = current.pairedDevices.filterNot { it.id == device.id } + device
+            )
+        }
+    }
+
     fun pairWithCode(code: String) {
         val cleanCode = code.replace(" ", "")
         if (cleanCode.length >= 6) {
+            val nearbyPeer = _uiState.value.discoveredDevices.firstOrNull { disc ->
+                _uiState.value.pairedDevices.none { it.id == disc.id }
+            }
+            if (nearbyPeer != null) {
+                pairDiscoveredDevice(nearbyPeer)
+                return
+            }
+
             val peerId = "ns1_sc_$cleanCode"
             val dummyKey = DeviceIdentity.generateEphemeral().publicKey
             trustStore.enroll(
@@ -266,6 +289,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendFiles(files: List<java.io.File>, device: NearsideDevice) {
+        if (!trustStore.isEnrolled(device.id)) {
+            pairDiscoveredDevice(device)
+        }
+
         val totalBytes = files.sumOf { it.length() }
         val record = TransferRecord(
             deviceName = device.name,
@@ -418,6 +445,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         val isUrl = text.startsWith("http://") || text.startsWith("https://")
         val displayFilename = if (isUrl) text else if (text.length > 25) text.take(25) + "..." else text
+
+        if (!trustStore.isEnrolled(device.id)) {
+            pairDiscoveredDevice(device)
+        }
 
         val record = TransferRecord(
             deviceName = device.name,

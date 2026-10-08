@@ -165,6 +165,7 @@ class MainActivity : ComponentActivity() {
                 val onBeam = remember { { device: NearsideDevice -> viewModel.sendClipboard(device) } }
                 val onClear = remember { { viewModel.clearHistory() } }
                 val onRequestBattery = remember { { requestBatteryExemption() } }
+                val onPairDiscovered = remember { { dev: NearsideDevice -> viewModel.pairDiscoveredDevice(dev) } }
                 val onSend = remember {
                     { device: NearsideDevice, uris: List<Uri> ->
                         val staged = uris.mapNotNull { uri ->
@@ -199,6 +200,7 @@ class MainActivity : ComponentActivity() {
                     onUnpair = onUnpair,
                     onPairWithCode = onPairCode,
                     onPairWithQrUri = onPairQr,
+                    onPairDiscovered = onPairDiscovered,
                     onSendFiles = onSend,
                     onBeamClipboard = onBeam,
                     onClearHistory = onClear
@@ -225,6 +227,7 @@ fun MainScreen(
     onUnpair: (String) -> Unit,
     onPairWithCode: (String) -> Unit,
     onPairWithQrUri: (String) -> Boolean,
+    onPairDiscovered: (NearsideDevice) -> Unit = {},
     onSendFiles: (NearsideDevice, List<Uri>) -> Unit,
     onBeamClipboard: (NearsideDevice) -> Unit,
     onClearHistory: () -> Unit
@@ -489,6 +492,31 @@ fun MainScreen(
                         },
                         onBeamClipboard = { onBeamClipboard(device) },
                         onUnpairClick = { onUnpair(device.id) }
+                    )
+                }
+            }
+
+            // Discovered Peers Section
+            val unpairedDiscovered = uiState.discoveredDevices.filter { disc ->
+                uiState.pairedDevices.none { paired -> paired.id == disc.id }
+            }
+            if (unpairedDiscovered.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "Available Nearby",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                items(unpairedDiscovered, key = { "disc_${it.id}" }) { device ->
+                    DiscoveredDeviceCard(
+                        device = device,
+                        onPairClick = { onPairDiscovered(device) },
+                        onSendFilesClick = {
+                            targetDeviceForPicker = device
+                            filePickerLauncher.launch("*/*")
+                        }
                     )
                 }
             }
@@ -928,6 +956,101 @@ fun IdentityCard(
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
                 ) {
                     Text(text = "Enter Code", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DiscoveredDeviceCard(
+    device: NearsideDevice,
+    onPairClick: () -> Unit,
+    onSendFilesClick: () -> Unit
+) {
+    val platformColor = when (device.platform) {
+        DevicePlatform.MACOS -> NearsideBlue
+        DevicePlatform.ANDROID -> NearsideGreen
+        DevicePlatform.IOS -> Color(0xFF8B5CF6)
+        DevicePlatform.WINDOWS -> Color(0xFF0284C7)
+        DevicePlatform.LINUX -> Color(0xFFEA580C)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(platformColor.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (device.platform == DevicePlatform.MACOS || device.platform == DevicePlatform.WINDOWS || device.platform == DevicePlatform.LINUX)
+                            Icons.Default.Computer
+                        else
+                            Icons.Default.Smartphone,
+                        contentDescription = null,
+                        tint = platformColor,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(14.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = device.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = platformColor.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = device.platform.displayName,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = platformColor,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Found on local Wi-Fi",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilledTonalButton(
+                        onClick = onPairClick,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
+                        Text(text = "Pair", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = onSendFilesClick,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(text = "Send", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }

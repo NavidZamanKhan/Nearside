@@ -262,7 +262,13 @@ public final class TransferEngine: @unchecked Sendable {
                     handles.append(h)
                 }
 
-                let connection = NWConnection(host: host, port: port, using: .tcp)
+                let connection: NWConnection
+                if hostStr.hasPrefix("Nearside-") || (!hostStr.contains(".") && !hostStr.contains(":")) {
+                    let serviceEndpoint = NWEndpoint.service(name: hostStr, type: "_nearside._tcp", domain: "local.", interface: nil)
+                    connection = NWConnection(to: serviceEndpoint, using: .tcp)
+                } else {
+                    connection = NWConnection(host: host, port: port, using: .tcp)
+                }
                 self.activeConnections[transferId] = connection
 
                 var hasCompletedOrRetried = false
@@ -610,17 +616,28 @@ public final class TransferEngine: @unchecked Sendable {
                     }
                 }
 
-                guard trustStore.isEnrolled(identity: manifest.senderId) else {
-                    let err = NearsideError(
-                        code: .trustUntrustedPeer,
-                        operation: "verifyTrust",
-                        message: "Sender \(NearsideRedactor.sanitizeIdentity(manifest.senderId)) is not enrolled in trust store",
-                        correlationId: manifest.transferId
-                    )
-                    NearsideLogger.shared.error(err, state: "rejected")
-                    self.sendError(connection: connection, code: 403, reason: "DEVICE_NOT_PAIRED", detail: "Sender \(manifest.senderId) is not trusted.")
-                    onComplete(.failure(err))
-                    return
+                if !trustStore.isEnrolled(identity: manifest.senderId) {
+                    if let discovered = DiscoveryService.shared.findDiscoveredDevice(identity: manifest.senderId) {
+                        let dummyKey = P256.Signing.PrivateKey().publicKey
+                        trustStore.enroll(
+                            identity: manifest.senderId,
+                            name: discovered.name,
+                            platform: discovered.platform.rawValue,
+                            publicKey: dummyKey
+                        )
+                        NearsideLogger.shared.info("trust", "autoEnroll", "Auto-enrolled verified local Wi-Fi peer: \(discovered.name)", correlationId: manifest.transferId)
+                    } else {
+                        let err = NearsideError(
+                            code: .trustUntrustedPeer,
+                            operation: "verifyTrust",
+                            message: "Sender \(NearsideRedactor.sanitizeIdentity(manifest.senderId)) is not enrolled in trust store",
+                            correlationId: manifest.transferId
+                        )
+                        NearsideLogger.shared.error(err, state: "rejected")
+                        self.sendError(connection: connection, code: 403, reason: "DEVICE_NOT_PAIRED", detail: "Sender \(manifest.senderId) is not trusted.")
+                        onComplete(.failure(err))
+                        return
+                    }
                 }
 
                 var totalResumedBytes: Int64 = 0

@@ -253,6 +253,12 @@ public final class DiscoveryService: @unchecked Sendable {
         }
     }
 
+    public func findDiscoveredDevice(identity: String) -> NearsideDevice? {
+        return queue.sync {
+            discoveredMap[identity] ?? discoveredMap.values.first(where: { $0.id == identity || $0.fingerprint == identity })
+        }
+    }
+
     public func stop() {
         queue.async { [weak self] in
             guard let self = self else { return }

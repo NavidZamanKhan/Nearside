@@ -203,6 +203,7 @@ class NearsideReceiverService : Service() {
                                     clearTransferNotification()
                                 }
                             } finally {
+                                try { client.close() } catch (ignored: Exception) {}
                                 powerLockManager.release(transferTag)
                                 if (powerLockManager.activeCount == 0) {
                                     updateNotification(isPaused = !isReceiving)
