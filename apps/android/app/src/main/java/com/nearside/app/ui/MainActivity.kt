@@ -1,10 +1,14 @@
 package com.nearside.app.ui
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -97,6 +101,7 @@ import com.nearside.app.ui.theme.NearsideTheme
 class MainActivity : ComponentActivity() {
 
     private val viewModel: AppViewModel by viewModels()
+    private var isBatteryExempt by mutableStateOf(true)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -106,8 +111,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun checkBatteryOptimizationStatus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            isBatteryExempt = powerManager?.isIgnoringBatteryOptimizations(packageName) == true
+        } else {
+            isBatteryExempt = true
+        }
+    }
+
+    private fun requestBatteryExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                startActivity(fallbackIntent)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        checkBatteryOptimizationStatus()
 
         // Request notification permission on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -126,6 +155,8 @@ class MainActivity : ComponentActivity() {
                 val uiState by viewModel.uiState.collectAsState()
                 MainScreen(
                     uiState = uiState,
+                    isBatteryExempt = isBatteryExempt,
+                    onRequestBatteryExemption = { requestBatteryExemption() },
                     onToggleReceiving = { viewModel.toggleReceiving(this) },
                     onCancelTransfer = { viewModel.cancelTransfer(it) },
                     onUnpair = { viewModel.unpairDevice(it) },
@@ -162,6 +193,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        checkBatteryOptimizationStatus()
         NearsideReceiverService.refresh(this)
     }
 }
@@ -170,6 +202,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     uiState: NearsideUiState,
+    isBatteryExempt: Boolean = true,
+    onRequestBatteryExemption: () -> Unit = {},
     onToggleReceiving: () -> Unit,
     onCancelTransfer: (String) -> Unit,
     onUnpair: (String) -> Unit,
@@ -264,6 +298,51 @@ fun MainScreen(
                             Icon(Icons.Default.ContentPaste, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(text = toast, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                    }
+                }
+            }
+
+            // Background Persistence Card (shown when battery optimizations are active)
+            if (!isBatteryExempt) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.PowerSettingsNew,
+                                    contentDescription = null,
+                                    tint = NearsideAmber,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Keep Resident in Background",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "Allow background power consumption so the notification banner stays active when the app is closed.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Button(
+                                onClick = onRequestBatteryExemption,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Allow Background Running")
+                            }
                         }
                     }
                 }

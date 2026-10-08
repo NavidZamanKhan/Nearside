@@ -252,6 +252,41 @@ class NearsideReceiverService : Service() {
         serviceScope.cancel()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        NearsideLogger.info("service", "onTaskRemoved", "User swiped app from Recents, maintaining resident foreground receiver")
+        if (isReceiving) {
+            try {
+                val restartIntent = Intent(applicationContext, NearsideReceiverService::class.java).apply {
+                    action = ACTION_START
+                }
+                val restartPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    PendingIntent.getForegroundService(
+                        applicationContext,
+                        99,
+                        restartIntent,
+                        PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                } else {
+                    PendingIntent.getService(
+                        applicationContext,
+                        99,
+                        restartIntent,
+                        PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+                val alarmManager = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+                alarmManager?.set(
+                    android.app.AlarmManager.ELAPSED_REALTIME,
+                    android.os.SystemClock.elapsedRealtime() + 500,
+                    restartPendingIntent
+                )
+            } catch (e: Exception) {
+                NearsideLogger.warn("service", "onTaskRemoved", "Error scheduling alarm restart", underlyingError = e)
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotificationChannels() {
