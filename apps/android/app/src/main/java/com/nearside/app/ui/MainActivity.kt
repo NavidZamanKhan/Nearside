@@ -157,16 +157,16 @@ class MainActivity : ComponentActivity() {
         setContent {
             NearsideTheme {
                 val uiState by viewModel.uiState.collectAsState()
-                MainScreen(
-                    uiState = uiState,
-                    isBatteryExempt = isBatteryExempt,
-                    onRequestBatteryExemption = { requestBatteryExemption() },
-                    onToggleReceiving = { viewModel.toggleReceiving(this) },
-                    onCancelTransfer = { viewModel.cancelTransfer(it) },
-                    onUnpair = { viewModel.unpairDevice(it) },
-                    onPairWithCode = { viewModel.pairWithCode(it) },
-                    onPairWithQrUri = { viewModel.pairWithQrUri(it) },
-                    onSendFiles = { device, uris ->
+                val onToggle = remember { { viewModel.toggleReceiving(this@MainActivity) } }
+                val onCancel = remember { { id: String -> viewModel.cancelTransfer(id) } }
+                val onUnpair = remember { { id: String -> viewModel.unpairDevice(id) } }
+                val onPairCode = remember { { code: String -> viewModel.pairWithCode(code) } }
+                val onPairQr = remember { { uri: String -> viewModel.pairWithQrUri(uri) } }
+                val onBeam = remember { { device: NearsideDevice -> viewModel.sendClipboard(device) } }
+                val onClear = remember { { viewModel.clearHistory() } }
+                val onRequestBattery = remember { { requestBatteryExemption() } }
+                val onSend = remember {
+                    { device: NearsideDevice, uris: List<Uri> ->
                         val staged = uris.mapNotNull { uri ->
                             try {
                                 val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file_${System.currentTimeMillis()}"
@@ -187,9 +187,21 @@ class MainActivity : ComponentActivity() {
                             val filenames = uris.map { it.lastPathSegment ?: "file" }
                             viewModel.simulateTransfer(device, filenames, 25_000_000L)
                         }
-                    },
-                    onBeamClipboard = { viewModel.sendClipboard(it) },
-                    onClearHistory = { viewModel.clearHistory() }
+                    }
+                }
+
+                MainScreen(
+                    uiState = uiState,
+                    isBatteryExempt = isBatteryExempt,
+                    onRequestBatteryExemption = onRequestBattery,
+                    onToggleReceiving = onToggle,
+                    onCancelTransfer = onCancel,
+                    onUnpair = onUnpair,
+                    onPairWithCode = onPairCode,
+                    onPairWithQrUri = onPairQr,
+                    onSendFiles = onSend,
+                    onBeamClipboard = onBeam,
+                    onClearHistory = onClear
                 )
             }
         }

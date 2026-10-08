@@ -158,17 +158,17 @@ class NearsideReceiverService : Service() {
     }
 
     private fun startTcpListener() {
-        stopTcpListener()
-        try {
-            val socket = ServerSocket(41433)
-            serverSocket = socket
-            NearsideLogger.info(
-                subsystem = "connection",
-                operation = "startTcpListener",
-                message = "TCP ServerSocket bound to port 41433",
-                state = "listening"
-            )
-            serviceScope.launch {
+        serviceScope.launch(Dispatchers.IO) {
+            stopTcpListener()
+            try {
+                val socket = ServerSocket(41433)
+                serverSocket = socket
+                NearsideLogger.info(
+                    subsystem = "connection",
+                    operation = "startTcpListener",
+                    message = "TCP ServerSocket bound to port 41433",
+                    state = "listening"
+                )
                 val trustStore = PinnedTrustStore(this@NearsideReceiverService)
                 val destDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
                     ?: filesDir
@@ -221,17 +221,17 @@ class NearsideReceiverService : Service() {
                         break
                     }
                 }
+            } catch (e: Exception) {
+                NearsideLogger.error(
+                    NearsideError(
+                        code = NearsideErrorCode.CONNECTION_BIND_FAILED,
+                        operation = "startTcpListener",
+                        message = "Failed to bind TCP ServerSocket to port 41433: ${e.message}",
+                        underlyingError = e
+                    ),
+                    state = "failed"
+                )
             }
-        } catch (e: Exception) {
-            NearsideLogger.error(
-                NearsideError(
-                    code = NearsideErrorCode.CONNECTION_BIND_FAILED,
-                    operation = "startTcpListener",
-                    message = "Failed to bind TCP ServerSocket to port 41433: ${e.message}",
-                    underlyingError = e
-                ),
-                state = "failed"
-            )
         }
     }
 
