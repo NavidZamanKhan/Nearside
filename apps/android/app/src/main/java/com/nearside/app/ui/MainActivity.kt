@@ -15,11 +15,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QrCode
@@ -55,6 +58,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -215,6 +219,7 @@ fun MainScreen(
 ) {
     var showQrDialog by remember { mutableStateOf(false) }
     var showCodeDialog by remember { mutableStateOf(false) }
+    var showDiagnosticsDialog by remember { mutableStateOf(false) }
     var targetDeviceForPicker by remember { mutableStateOf<NearsideDevice?>(null) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -243,7 +248,8 @@ fun MainScreen(
                         Text(
                             text = "Nearside",
                             fontWeight = FontWeight.Bold,
-                            fontSize = 20.sp
+                            fontSize = 22.sp,
+                            letterSpacing = (-0.5).sp
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Box(
@@ -255,17 +261,11 @@ fun MainScreen(
                     }
                 },
                 actions = {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.padding(end = 12.dp)
-                    ) {
-                        Text(
-                            text = "${uiState.localIpAddress}:${uiState.localPort}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    IconButton(onClick = { showDiagnosticsDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Network & Diagnostics",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 },
@@ -289,14 +289,15 @@ fun MainScreen(
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
                     ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
+                            modifier = Modifier.padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(Icons.Default.ContentPaste, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
                             Text(text = toast, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
                         }
                     }
@@ -308,20 +309,29 @@ fun MainScreen(
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        border = BorderStroke(1.dp, NearsideAmber.copy(alpha = 0.35f)),
                         colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            containerColor = NearsideAmber.copy(alpha = 0.08f)
                         )
                     ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
+                        Column(modifier = Modifier.padding(18.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.PowerSettingsNew,
-                                    contentDescription = null,
-                                    tint = NearsideAmber,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(12.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(NearsideAmber.copy(alpha = 0.2f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PowerSettingsNew,
+                                        contentDescription = null,
+                                        tint = NearsideAmber,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(14.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = "Keep Resident in Background",
@@ -329,17 +339,17 @@ fun MainScreen(
                                         fontWeight = FontWeight.SemiBold
                                     )
                                     Text(
-                                        text = "Allow background power consumption so the notification banner stays active when the app is closed.",
+                                        text = "Allow background power consumption so the notification banner stays active when the app is minimized.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(12.dp))
+                            Spacer(modifier = Modifier.height(14.dp))
                             Button(
                                 onClick = onRequestBatteryExemption,
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp)
+                                shape = RoundedCornerShape(12.dp)
                             ) {
                                 Text("Allow Background Running")
                             }
@@ -390,33 +400,66 @@ fun MainScreen(
                 )
             }
 
-            // Available Peers Section
+            // Nearby Devices Section
             item {
-                Text(
-                    text = "AVAILABLE PEERS",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Nearby Devices",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Text(
+                            text = "${uiState.pairedDevices.size}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
 
             if (uiState.pairedDevices.isEmpty()) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                     ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(24.dp),
+                                .padding(28.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "No paired peers. Use QR or short code to pair.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    imageVector = Icons.Default.WifiTethering,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "No devices paired yet",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 15.sp
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Tap Pair to connect with your Mac or other phones",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
@@ -446,9 +489,8 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "RECENT TRANSFERS",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = "Recent Transfers",
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     if (uiState.recentTransfers.isNotEmpty()) {
@@ -499,6 +541,13 @@ fun MainScreen(
             }
         )
     }
+
+    if (showDiagnosticsDialog) {
+        DiagnosticsDialog(
+            uiState = uiState,
+            onDismiss = { showDiagnosticsDialog = false }
+        )
+    }
 }
 
 @Composable
@@ -506,32 +555,42 @@ fun ControlCenterHeroCard(
     isReceivingActive: Boolean,
     onToggle: () -> Unit
 ) {
+    val containerColor = if (isReceivingActive) {
+        NearsideGreen.copy(alpha = 0.08f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    }
+    val borderColor = if (isReceivingActive) {
+        NearsideGreen.copy(alpha = 0.35f)
+    } else {
+        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isReceivingActive)
-                NearsideGreen.copy(alpha = 0.10f)
-            else
-                MaterialTheme.colorScheme.surfaceVariant
-        )
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(1.dp, borderColor),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
     ) {
-        Column(modifier = Modifier.padding(18.dp)) {
+        Column(modifier = Modifier.padding(20.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(44.dp)
+                            .size(46.dp)
                             .clip(CircleShape)
                             .background(
                                 if (isReceivingActive)
-                                    NearsideGreen.copy(alpha = 0.20f)
+                                    NearsideGreen.copy(alpha = 0.18f)
                                 else
-                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.20f)
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
                             ),
                         contentAlignment = Alignment.Center
                     ) {
@@ -547,12 +606,12 @@ fun ControlCenterHeroCard(
 
                     Column {
                         Text(
-                            text = if (isReceivingActive) "Receiving Ready" else "Dormant (Off)",
+                            text = if (isReceivingActive) "Ready to Receive" else "Receiving Paused",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = if (isReceivingActive) "Port 41433 • Broadcasting mDNS" else "Zero battery • Sockets closed",
+                            text = if (isReceivingActive) "Visible to nearby devices on Wi-Fi" else "Hidden from nearby devices",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -573,10 +632,11 @@ fun ControlCenterHeroCard(
 
             Text(
                 text = if (isReceivingActive)
-                    "Nearside is receptive to inbound files and clipboard beaming from trusted peers on this network."
+                    "Anyone on your local network can beam files, photos, and links to this phone."
                 else
-                    "Receiving is turned off to save battery and memory. Outbound sending remains available anytime.",
+                    "Turn on when you want to receive files from your Mac or other devices.",
                 fontSize = 12.sp,
+                lineHeight = 16.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -593,35 +653,68 @@ fun DirectActionsRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        OutlinedButton(
+        FilledTonalButton(
             onClick = onPickFiles,
             modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(12.dp)
+            shape = RoundedCornerShape(14.dp),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 12.dp)
         ) {
-            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(text = "Files", fontSize = 12.sp)
+            Text(
+                text = "Files",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
+            )
         }
 
-        OutlinedButton(
+        FilledTonalButton(
             onClick = onPickPhotos,
             modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(12.dp)
+            shape = RoundedCornerShape(14.dp),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 12.dp)
         ) {
-            Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+            Icon(
+                imageVector = Icons.Default.Image,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(text = "Photos", fontSize = 12.sp)
+            Text(
+                text = "Photos",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
+            )
         }
 
         Button(
             onClick = onShowPairing,
             modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(14.dp),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
         ) {
-            Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(16.dp))
+            Icon(
+                imageVector = Icons.Default.QrCode,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(text = "Pair", fontSize = 12.sp)
+            Text(
+                text = "Pair",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
+            )
         }
     }
 }
@@ -637,7 +730,8 @@ fun ActiveTransferCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -646,10 +740,13 @@ fun ActiveTransferCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(36.dp)
                             .clip(CircleShape)
                             .background(if (isIncoming) NearsideGreen.copy(alpha = 0.2f) else NearsideBlue.copy(alpha = 0.2f)),
                         contentAlignment = Alignment.Center
@@ -658,7 +755,7 @@ fun ActiveTransferCard(
                             imageVector = if (isIncoming) Icons.AutoMirrored.Filled.ArrowBack else Icons.AutoMirrored.Filled.ArrowForward,
                             contentDescription = null,
                             tint = if (isIncoming) NearsideGreen else NearsideBlue,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(10.dp))
@@ -719,6 +816,7 @@ fun ActiveTransferCard(
                 OutlinedButton(
                     onClick = onCancel,
                     shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
                 ) {
                     Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(12.dp))
@@ -738,47 +836,86 @@ fun IdentityCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Device Identity",
-                style = MaterialTheme.typography.titleMedium
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = uiState.localDeviceName,
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp
-            )
-            Text(
-                text = "Fingerprint: ${uiState.localFingerprint.take(18)}...",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(NearsideBlue.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Smartphone,
+                        contentDescription = null,
+                        tint = NearsideBlue,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(14.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "THIS DEVICE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = uiState.localDeviceName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Text(
+                        text = "Code: ${uiState.activePairingCode}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FilledTonalButton(
                     onClick = onShowQr,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
                 ) {
-                    Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(
+                        imageVector = Icons.Default.QrCode,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "Show QR", fontSize = 12.sp)
+                    Text(text = "Show QR", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
 
-                Button(
+                FilledTonalButton(
                     onClick = onEnterCode,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
                 ) {
-                    Text(text = "Pair Code", fontSize = 12.sp)
+                    Text(text = "Enter Code", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -803,17 +940,18 @@ fun DeviceRowCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .background(platformColor.copy(alpha = 0.15f)),
                     contentAlignment = Alignment.Center
@@ -829,7 +967,7 @@ fun DeviceRowCard(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(14.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -838,7 +976,7 @@ fun DeviceRowCard(
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         Surface(
                             shape = RoundedCornerShape(6.dp),
                             color = platformColor.copy(alpha = 0.15f)
@@ -853,9 +991,8 @@ fun DeviceRowCard(
                         }
                     }
                     Text(
-                        text = "${device.shortFingerprint} • ${device.ipAddress ?: "Direct"}",
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
+                        text = "Connected on local Wi-Fi",
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -867,49 +1004,140 @@ fun DeviceRowCard(
                     Icon(
                         Icons.Default.DeleteOutline,
                         contentDescription = "Unpair",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                         modifier = Modifier.size(18.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = onSendFilesClick,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp)
                 ) {
                     Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = "Send File", fontSize = 11.sp)
+                    Text(
+                        text = "Files",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
 
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = onSendPhotosClick,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp)
                 ) {
                     Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = "Photos", fontSize = 11.sp)
+                    Text(
+                        text = "Photos",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
 
                 Button(
                     onClick = onBeamClipboard,
-                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = NearsideBlue)
                 ) {
                     Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = "Beam", fontSize = 11.sp)
+                    Text(
+                        text = "Beam",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+fun DiagnosticsDialog(
+    uiState: NearsideUiState,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = null,
+                    tint = NearsideBlue,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Network & Diagnostics")
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                DiagnosticItem(
+                    label = "LOCAL IP ADDRESS",
+                    value = uiState.localIpAddress
+                )
+                DiagnosticItem(
+                    label = "TCP PORT",
+                    value = uiState.localPort.toString()
+                )
+                DiagnosticItem(
+                    label = "RECEIVER STATUS",
+                    value = if (uiState.isReceivingActive) "Active (Listening on port ${uiState.localPort})" else "Dormant (Sockets closed)"
+                )
+                DiagnosticItem(
+                    label = "CRYPTO FINGERPRINT",
+                    value = uiState.localFingerprint
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+fun DiagnosticItem(label: String, value: String) {
+    Column {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = value,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
