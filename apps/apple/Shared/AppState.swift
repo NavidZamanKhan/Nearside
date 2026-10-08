@@ -180,6 +180,8 @@ public final class AppState: ObservableObject {
                             }
                             #if os(macOS)
                             MacNotificationManager.shared.notifyTransferComplete(record: finished, downloadsURL: self.downloadsFolderURL)
+                            #elseif os(iOS)
+                            IOSNotificationManager.shared.notifyTransferComplete(record: finished, downloadsURL: self.downloadsFolderURL)
                             #endif
                         case .failure(let error):
                             let nsErr = (error as? NearsideError) ?? (error as? TransferEngineError)?.toNearsideError(operation: "handleInboundConnection") ?? NearsideError(code: .transferInterrupted, operation: "handleInboundConnection", message: error.localizedDescription, underlyingError: error)
@@ -227,6 +229,10 @@ public final class AppState: ObservableObject {
         #if os(macOS)
         StatusItemController.shared.updateStatusIcon(isReceivingActive: isReceivingActive, isTransferring: false)
         #endif
+    }
+
+    public func cancelTransfer(id: String) {
+        cancelActiveTransfer()
     }
 
     public func pairDevice(identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey) {

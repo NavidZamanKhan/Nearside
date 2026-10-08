@@ -50,6 +50,7 @@ xcrun swiftc -O -emit-executable \
     apps/apple/Shared/Transfer/TransferProtocol.swift \
     apps/apple/Shared/Transfer/TransferEngine.swift \
     apps/apple/Shared/AppState.swift \
+    apps/apple/iOS/Notifications/IOSNotificationManager.swift \
     apps/apple/iOS/Views/QRPairingScannerView.swift \
     apps/apple/iOS/Views/NearsideSettingsView.swift \
     apps/apple/iOS/Views/NearsideHomeView.swift \
