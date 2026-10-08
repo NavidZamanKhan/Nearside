@@ -19,6 +19,7 @@ import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.model.TransferStatus
 import com.nearside.app.service.NearsideReceiverService
+import com.nearside.app.transfer.TransferEngine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -176,40 +177,72 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pairWithQrUri(uriString: String): Boolean {
         val payload = QRPairingPayload.fromUri(uriString) ?: return false
-        val dummyKey = DeviceIdentity.generateEphemeral().publicKey
-        trustStore.enroll(
-            identity = payload.hostIdentity,
-            name = payload.hostName,
-            platform = "macos",
-            publicKey = dummyKey
-        )
-
-        val newDevice = NearsideDevice(
-            id = payload.hostIdentity,
-            name = payload.hostName,
-            platform = DevicePlatform.MACOS,
-            fingerprint = payload.hostIdentity,
-            reachability = DeviceReachability.ONLINE
-        )
-
-        _uiState.update { current ->
-            current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == payload.hostIdentity } + newDevice)
+        val host = payload.ip ?: _uiState.value.discoveredDevices.firstOrNull { it.id == payload.hostIdentity }?.ipAddress
+        val port = payload.port ?: 41433
+        if (!host.isNullOrEmpty()) {
+            viewModelScope.launch {
+                val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore)
+                res.onSuccess { resp ->
+                    val newDevice = NearsideDevice(
+                        id = resp.serverId,
+                        name = resp.serverName,
+                        platform = DevicePlatform.MACOS,
+                        fingerprint = resp.serverId,
+                        ipAddress = host,
+                        port = port,
+                        reachability = DeviceReachability.ONLINE
+                    )
+                    _uiState.update { current ->
+                        current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
+                    }
+                }
+            }
+            return true
         }
-        return true
+        return false
+    }
+
+    fun pairWithHost(host: String, port: Int = 41433) {
+        viewModelScope.launch {
+            val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore)
+            res.onSuccess { resp ->
+                val newDevice = NearsideDevice(
+                    id = resp.serverId,
+                    name = resp.serverName,
+                    platform = DevicePlatform.MACOS,
+                    fingerprint = resp.serverId,
+                    ipAddress = host,
+                    port = port,
+                    reachability = DeviceReachability.ONLINE
+                )
+                _uiState.update { current ->
+                    current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
+                }
+            }
+        }
     }
 
     fun pairDiscoveredDevice(device: NearsideDevice) {
-        val dummyKey = DeviceIdentity.generateEphemeral().publicKey
-        trustStore.enroll(
-            identity = device.id,
-            name = device.name,
-            platform = device.platform.name.lowercase(),
-            publicKey = dummyKey
-        )
-        _uiState.update { current ->
-            current.copy(
-                pairedDevices = current.pairedDevices.filterNot { it.id == device.id } + device
-            )
+        val host = device.ipAddress ?: com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.id)?.ipAddress
+        val port = device.port ?: 41433
+        if (!host.isNullOrEmpty()) {
+            viewModelScope.launch {
+                val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore)
+                res.onSuccess { resp ->
+                    val newDevice = NearsideDevice(
+                        id = resp.serverId,
+                        name = resp.serverName,
+                        platform = device.platform,
+                        fingerprint = resp.serverId,
+                        ipAddress = host,
+                        port = port,
+                        reachability = DeviceReachability.ONLINE
+                    )
+                    _uiState.update { current ->
+                        current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
+                    }
+                }
+            }
         }
     }
 
@@ -219,28 +252,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val nearbyPeer = _uiState.value.discoveredDevices.firstOrNull { disc ->
                 _uiState.value.pairedDevices.none { it.id == disc.id }
             }
-            if (nearbyPeer != null) {
-                pairDiscoveredDevice(nearbyPeer)
-                return
-            }
-
-            val peerId = "ns1_sc_$cleanCode"
-            val dummyKey = DeviceIdentity.generateEphemeral().publicKey
-            trustStore.enroll(
-                identity = peerId,
-                name = "Paired Peer (${cleanCode.take(4)})",
-                platform = "macos",
-                publicKey = dummyKey
-            )
-
-            val newDevice = NearsideDevice(
-                id = peerId,
-                name = "Paired Peer (${cleanCode.take(4)})",
-                platform = DevicePlatform.MACOS,
-                fingerprint = peerId
-            )
-            _uiState.update { current ->
-                current.copy(pairedDevices = current.pairedDevices + newDevice)
+            if (nearbyPeer != null && !nearbyPeer.ipAddress.isNullOrEmpty()) {
+                val host = nearbyPeer.ipAddress
+                val port = nearbyPeer.port ?: 41433
+                viewModelScope.launch {
+                    val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = cleanCode, trustStore = trustStore)
+                    res.onSuccess { resp ->
+                        val newDevice = NearsideDevice(
+                            id = resp.serverId,
+                            name = resp.serverName,
+                            platform = nearbyPeer.platform,
+                            fingerprint = resp.serverId,
+                            ipAddress = host,
+                            port = port,
+                            reachability = DeviceReachability.ONLINE
+                        )
+                        _uiState.update { current ->
+                            current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
+                        }
+                    }
+                }
             }
         }
     }

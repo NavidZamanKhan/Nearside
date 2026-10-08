@@ -105,12 +105,68 @@ public struct ErrorFrame: Codable, Equatable {
     }
 }
 
+public struct PairRequestFrame: Codable, Equatable {
+    public let clientId: String
+    public let clientName: String
+    public let clientPlatform: String
+    public let clientSpkiBase64: String
+    public let confirmationCode: String
+    public let timestamp: Int64
+
+    public enum CodingKeys: String, CodingKey {
+        case clientId = "client_id"
+        case clientName = "client_name"
+        case clientPlatform = "client_platform"
+        case clientSpkiBase64 = "client_spki_base64"
+        case confirmationCode = "confirmation_code"
+        case timestamp
+    }
+
+    public init(clientId: String, clientName: String, clientPlatform: String, clientSpkiBase64: String, confirmationCode: String, timestamp: Int64 = Int64(Date().timeIntervalSince1970)) {
+        self.clientId = clientId
+        self.clientName = clientName
+        self.clientPlatform = clientPlatform
+        self.clientSpkiBase64 = clientSpkiBase64
+        self.confirmationCode = confirmationCode
+        self.timestamp = timestamp
+    }
+}
+
+public struct PairResponseFrame: Codable, Equatable {
+    public let status: String
+    public let serverId: String
+    public let serverName: String
+    public let serverPlatform: String
+    public let serverSpkiBase64: String
+    public let timestamp: Int64
+
+    public enum CodingKeys: String, CodingKey {
+        case status
+        case serverId = "server_id"
+        case serverName = "server_name"
+        case serverPlatform = "server_platform"
+        case serverSpkiBase64 = "server_spki_base64"
+        case timestamp
+    }
+
+    public init(status: String, serverId: String, serverName: String, serverPlatform: String, serverSpkiBase64: String, timestamp: Int64 = Int64(Date().timeIntervalSince1970)) {
+        self.status = status
+        self.serverId = serverId
+        self.serverName = serverName
+        self.serverPlatform = serverPlatform
+        self.serverSpkiBase64 = serverSpkiBase64
+        self.timestamp = timestamp
+    }
+}
+
 public enum FrameType: UInt8 {
     case manifest = 0x01
     case ack = 0x02
     case chunk = 0x03
     case error = 0x04
     case complete = 0x05
+    case pairRequest = 0x10
+    case pairResponse = 0x11
 }
 
 public struct TransferChunk {

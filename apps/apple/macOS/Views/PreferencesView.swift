@@ -97,7 +97,7 @@ public struct PreferencesView: View {
                 }
             }
 
-            if appState.pairedDevices.isEmpty {
+            if appState.pairedDevices.isEmpty && appState.discoveredDevices.isEmpty {
                 VStack(spacing: 8) {
                     Spacer()
                     Image(systemName: "shield.slash")
@@ -113,33 +113,70 @@ public struct PreferencesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(appState.pairedDevices) { device in
-                        HStack {
-                            Image(systemName: device.platform.systemSymbolName)
-                                .font(.system(size: 18))
-                                .foregroundColor(.accentColor)
-                                .frame(width: 28)
+                    let unpariedDiscovered = appState.discoveredDevices.filter { disc in
+                        !appState.pairedDevices.contains(where: { $0.id == disc.id })
+                    }
+                    if !unpariedDiscovered.isEmpty {
+                        Section(header: Text("Discovered Nearby").font(.caption).foregroundColor(.secondary)) {
+                            ForEach(unpariedDiscovered) { device in
+                                HStack {
+                                    Image(systemName: device.platform.systemSymbolName)
+                                        .font(.system(size: 16))
+                                        .foregroundColor(.accentColor)
+                                        .frame(width: 24)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(device.name)
-                                    .font(.system(size: 13, weight: .medium))
-                                Text(device.fingerprint)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.name)
+                                            .font(.system(size: 13, weight: .medium))
+                                        Text(device.ipAddress ?? "Wi-Fi Peer")
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Button("Pair") {
+                                        appState.pairDiscoveredDevice(device)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                }
+                                .padding(.vertical, 2)
                             }
-
-                            Spacer()
-
-                            Button(action: {
-                                appState.unpairDevice(id: device.id)
-                            }) {
-                                Text("Unpair")
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                            }
-                            .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 4)
+                    }
+
+                    if !appState.pairedDevices.isEmpty {
+                        Section(header: Text("Paired Devices").font(.caption).foregroundColor(.secondary)) {
+                            ForEach(appState.pairedDevices) { device in
+                                HStack {
+                                    Image(systemName: device.platform.systemSymbolName)
+                                        .font(.system(size: 18))
+                                        .foregroundColor(.accentColor)
+                                        .frame(width: 28)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.name)
+                                            .font(.system(size: 13, weight: .medium))
+                                        Text(device.fingerprint)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Button(action: {
+                                        appState.unpairDevice(id: device.id)
+                                    }) {
+                                        Text("Unpair")
+                                            .font(.caption)
+                                            .foregroundColor(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
                     }
                 }
             }
@@ -259,15 +296,20 @@ public struct PreferencesView: View {
                         .textFieldStyle(.roundedBorder)
 
                     Button("Confirm Pairing") {
-                        if shortCodeInput.count >= 6 {
-                            let dummyKey = P256.Signing.PrivateKey().publicKey
-                            let devId = "ns1_sc_\(shortCodeInput)"
-                            appState.pairDevice(
-                                identity: devId,
-                                name: "Paired Peer (\(shortCodeInput.prefix(4)))",
-                                platform: "android",
-                                publicKey: dummyKey
-                            )
+                        let input = shortCodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let uriPayload = QRPairingPayload.fromURI(input), let ip = uriPayload.ip {
+                            appState.pairWithPeerAddress(host: ip, port: UInt16(uriPayload.port ?? 41433), confirmationCode: "")
+                            showingPairSheet = false
+                            shortCodeInput = ""
+                        } else if input.contains(".") {
+                            let parts = input.split(separator: ":")
+                            let host = String(parts[0])
+                            let port = parts.count > 1 ? (UInt16(parts[1]) ?? 41433) : 41433
+                            appState.pairWithPeerAddress(host: host, port: port, confirmationCode: "")
+                            showingPairSheet = false
+                            shortCodeInput = ""
+                        } else if let disc = appState.discoveredDevices.first(where: { d in !appState.pairedDevices.contains(where: { p in p.id == d.id }) }) ?? appState.discoveredDevices.first {
+                            appState.pairDiscoveredDevice(disc)
                             showingPairSheet = false
                             shortCodeInput = ""
                         }

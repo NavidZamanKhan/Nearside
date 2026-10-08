@@ -47,6 +47,11 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Speed
@@ -161,7 +166,22 @@ class MainActivity : ComponentActivity() {
                 val onCancel = remember { { id: String -> viewModel.cancelTransfer(id) } }
                 val onUnpair = remember { { id: String -> viewModel.unpairDevice(id) } }
                 val onPairCode = remember { { code: String -> viewModel.pairWithCode(code) } }
-                val onPairQr = remember { { uri: String -> viewModel.pairWithQrUri(uri) } }
+                val onPairQr = remember {
+                    { input: String ->
+                        val trimmed = input.trim()
+                        if (trimmed.startsWith("nearside://pair")) {
+                            viewModel.pairWithQrUri(trimmed)
+                        } else if (trimmed.contains(".")) {
+                            val parts = trimmed.split(":")
+                            val host = parts[0]
+                            val port = parts.getOrNull(1)?.toIntOrNull() ?: 41433
+                            viewModel.pairWithHost(host, port)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
                 val onBeam = remember { { device: NearsideDevice -> viewModel.sendClipboard(device) } }
                 val onClear = remember { { viewModel.clearHistory() } }
                 val onRequestBattery = remember { { requestBatteryExemption() } }
@@ -1364,6 +1384,41 @@ fun TransferRow(record: TransferRecord) {
     }
 }
 
+fun generateQrBitmap(content: String, size: Int = 512): Bitmap? {
+    return try {
+        val writer = QRCodeWriter()
+        val bitMatrix = writer.encode(content, BarcodeFormat.QR_CODE, size, size)
+        val width = bitMatrix.width
+        val height = bitMatrix.height
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
+        for (x in 0 until width) {
+            for (y in 0 until height) {
+                bitmap.setPixel(x, y, if (bitMatrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+            }
+        }
+        bitmap
+    } catch (e: Exception) {
+        null
+    }
+}
+
+fun getLocalWifiIp(): String {
+    try {
+        val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+        while (interfaces.hasMoreElements()) {
+            val networkInterface = interfaces.nextElement()
+            val addresses = networkInterface.inetAddresses
+            while (addresses.hasMoreElements()) {
+                val address = addresses.nextElement()
+                if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
+                    return address.hostAddress ?: ""
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    return "127.0.0.1"
+}
+
 @Composable
 fun QrPairingDialog(
     fingerprint: String,
@@ -1373,9 +1428,21 @@ fun QrPairingDialog(
     var uriInput by remember { mutableStateOf("") }
     var isEnteringUri by remember { mutableStateOf(false) }
 
+    val localIp = remember { getLocalWifiIp() }
+    val qrPayload = remember(fingerprint) {
+        com.nearside.app.crypto.QRPairingPayload.createNew(
+            hostIdentity = fingerprint,
+            hostName = android.os.Build.MODEL,
+            ip = localIp,
+            port = 41433
+        )
+    }
+    val qrUri = remember(qrPayload) { qrPayload.toUri() }
+    val qrBitmap = remember(qrUri) { generateQrBitmap(qrUri, 512) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = if (isEnteringUri) "Connect via URI" else "Pair with QR Code") },
+        title = { Text(text = if (isEnteringUri) "Connect via URI or IP" else "Pair with QR Code") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -1383,7 +1450,7 @@ fun QrPairingDialog(
             ) {
                 if (isEnteringUri) {
                     Text(
-                        text = "Paste or enter the nearside://pair URI from your other device:",
+                        text = "Paste or enter the nearside://pair URI or Mac IP address:",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1391,41 +1458,49 @@ fun QrPairingDialog(
                     OutlinedTextField(
                         value = uriInput,
                         onValueChange = { uriInput = it },
-                        label = { Text(text = "nearside://pair?...") },
+                        label = { Text(text = "nearside://pair?... or 192.168.0.x") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = false,
                         maxLines = 3
                     )
                 } else {
                     Text(
-                        text = "Scan this code with the Nearside app on your Mac or other device:",
+                        text = "Scan this code with Nearside on your Mac or enter this phone's IP:",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Box(
                         modifier = Modifier
-                            .size(160.dp)
+                            .size(200.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color.White),
+                            .background(androidx.compose.ui.graphics.Color.White)
+                            .padding(8.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (qrBitmap != null) {
+                            Image(
+                                bitmap = qrBitmap.asImageBitmap(),
+                                contentDescription = "Pairing QR Code",
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
                             Icon(
                                 imageVector = Icons.Default.QrCode,
                                 contentDescription = null,
-                                tint = Color.Black,
+                                tint = androidx.compose.ui.graphics.Color.Black,
                                 modifier = Modifier.size(100.dp)
-                            )
-                            Text(
-                                text = "nearside://pair",
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color.DarkGray
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Device IP: $localIp:41433",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Fingerprint: ${fingerprint.take(16)}...",
                         fontFamily = FontFamily.Monospace,
@@ -1435,17 +1510,17 @@ fun QrPairingDialog(
                 }
                 Spacer(modifier = Modifier.height(12.dp))
                 TextButton(onClick = { isEnteringUri = !isEnteringUri }) {
-                    Text(text = if (isEnteringUri) "Show My QR Code" else "Enter URI Manually")
+                    Text(text = if (isEnteringUri) "Show My QR Code" else "Enter URI or IP Manually")
                 }
             }
         },
         confirmButton = {
             if (isEnteringUri) {
                 Button(
-                    onClick = { onPairWithUri(uriInput) },
-                    enabled = uriInput.startsWith("nearside://pair")
+                    onClick = { onPairWithUri(uriInput.trim()) },
+                    enabled = uriInput.isNotBlank()
                 ) {
-                    Text(text = "Pair")
+                    Text(text = "Connect")
                 }
             } else {
                 Button(onClick = onDismiss) {
@@ -1454,10 +1529,8 @@ fun QrPairingDialog(
             }
         },
         dismissButton = {
-            if (isEnteringUri) {
-                TextButton(onClick = onDismiss) {
-                    Text(text = "Cancel")
-                }
+            TextButton(onClick = onDismiss) {
+                Text(text = "Cancel")
             }
         }
     )

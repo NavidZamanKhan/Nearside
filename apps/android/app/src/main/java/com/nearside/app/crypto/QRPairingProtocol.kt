@@ -16,6 +16,8 @@ data class QRPairingPayload(
     val hostIdentity: String,
     val hostName: String,
     val sharedSecretBase64: String,
+    val ip: String? = null,
+    val port: Int? = 41433,
     val createdAtSeconds: Double = System.currentTimeMillis() / 1000.0,
     val expirySeconds: Double = 180.0
 ) {
@@ -25,11 +27,15 @@ data class QRPairingPayload(
     fun toUri(): String {
         val encodedName = URLEncoder.encode(hostName, "UTF-8")
         val encodedSec = URLEncoder.encode(sharedSecretBase64, "UTF-8")
-        return "nearside://pair?v=$version&sid=$sessionId&id=$hostIdentity&name=$encodedName&sec=$encodedSec"
+        var uri = "nearside://pair?v=$version&sid=$sessionId&id=$hostIdentity&name=$encodedName&sec=$encodedSec"
+        if (!ip.isNullOrEmpty()) {
+            uri += "&ip=$ip&port=${port ?: 41433}"
+        }
+        return uri
     }
 
     companion object {
-        fun createNew(hostIdentity: String, hostName: String): QRPairingPayload {
+        fun createNew(hostIdentity: String, hostName: String, ip: String? = null, port: Int? = 41433): QRPairingPayload {
             val random = SecureRandom()
             val secretBytes = ByteArray(32)
             random.nextBytes(secretBytes)
@@ -39,7 +45,9 @@ data class QRPairingPayload(
                 sessionId = UUID.randomUUID().toString(),
                 hostIdentity = hostIdentity,
                 hostName = hostName,
-                sharedSecretBase64 = secretBase64
+                sharedSecretBase64 = secretBase64,
+                ip = ip,
+                port = port
             )
         }
 
@@ -61,13 +69,17 @@ data class QRPairingPayload(
                 val sec = params["sec"] ?: return null
                 val name = params["name"] ?: "Nearby Peer"
                 val version = params["v"]?.toIntOrNull() ?: 1
+                val ip = params["ip"]
+                val port = params["port"]?.toIntOrNull() ?: 41433
 
                 QRPairingPayload(
                     version = version,
                     sessionId = sid,
                     hostIdentity = id,
                     hostName = name,
-                    sharedSecretBase64 = sec
+                    sharedSecretBase64 = sec,
+                    ip = ip,
+                    port = port
                 )
             } catch (e: Exception) {
                 null

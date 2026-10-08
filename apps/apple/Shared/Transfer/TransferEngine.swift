@@ -159,6 +159,164 @@ public final class TransferEngine: @unchecked Sendable {
         )
     }
 
+    public func initiatePairing(
+        to host: String,
+        port: UInt16 = 41433,
+        confirmationCode: String = "",
+        deviceIdentity: DeviceIdentity,
+        deviceName: String,
+        trustStore: PinnedTrustStore,
+        completion: @escaping (Result<PairResponseFrame, Error>) -> Void
+    ) {
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port) ?? 41433)
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        var hasFinished = false
+
+        func finish(_ result: Result<PairResponseFrame, Error>) {
+            guard !hasFinished else { return }
+            hasFinished = true
+            connection.cancel()
+            completion(result)
+        }
+
+        let timeoutWorkItem = DispatchWorkItem {
+            finish(.failure(TransferEngineError.connectionFailed("Pairing connection timed out")))
+        }
+        queue.asyncAfter(deadline: .now() + 8.0, execute: timeoutWorkItem)
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .ready:
+                timeoutWorkItem.cancel()
+                self.sendPairRequest(
+                    connection: connection,
+                    confirmationCode: confirmationCode,
+                    deviceIdentity: deviceIdentity,
+                    deviceName: deviceName,
+                    trustStore: trustStore,
+                    finish: finish
+                )
+            case .failed(let err):
+                timeoutWorkItem.cancel()
+                finish(.failure(TransferEngineError.connectionFailed(err.localizedDescription)))
+            case .cancelled:
+                timeoutWorkItem.cancel()
+            default:
+                break
+            }
+        }
+        connection.start(queue: self.queue)
+    }
+
+    private func sendPairRequest(
+        connection: NWConnection,
+        confirmationCode: String,
+        deviceIdentity: DeviceIdentity,
+        deviceName: String,
+        trustStore: PinnedTrustStore,
+        finish: @escaping (Result<PairResponseFrame, Error>) -> Void
+    ) {
+        let req = PairRequestFrame(
+            clientId: deviceIdentity.publicIdentity,
+            clientName: deviceName,
+            clientPlatform: "macos",
+            clientSpkiBase64: deviceIdentity.spkiDer.base64EncodedString(),
+            confirmationCode: confirmationCode
+        )
+        guard let reqData = try? JSONEncoder().encode(req) else {
+            finish(.failure(TransferEngineError.manifestRejected("Failed to encode PairRequestFrame")))
+            return
+        }
+
+        var header = Data()
+        var magicBE = TransferChunk.magic.bigEndian
+        header.append(Data(bytes: &magicBE, count: 4))
+        var type = FrameType.pairRequest.rawValue
+        header.append(Data(bytes: &type, count: 1))
+        var lenBE = UInt32(reqData.count).bigEndian
+        header.append(Data(bytes: &lenBE, count: 4))
+        header.append(reqData)
+
+        connection.send(content: header, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+            if let error = error {
+                finish(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                return
+            }
+
+            self.receivePairResponse(connection: connection, trustStore: trustStore, finish: finish)
+        })
+    }
+
+    private func receivePairResponse(
+        connection: NWConnection,
+        trustStore: PinnedTrustStore,
+        finish: @escaping (Result<PairResponseFrame, Error>) -> Void
+    ) {
+        connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { headerData, _, _, error in
+            if let error = error {
+                finish(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                return
+            }
+            guard let data = headerData, data.count == 9 else {
+                finish(.failure(TransferEngineError.connectionFailed("Invalid pair response header length")))
+                return
+            }
+
+            let magic = data.subdata(in: 0..<4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
+            guard magic == TransferChunk.magic else {
+                finish(.failure(TransferEngineError.connectionFailed("Invalid protocol magic")))
+                return
+            }
+
+            let frameType = data[4]
+            guard frameType == FrameType.pairResponse.rawValue else {
+                finish(.failure(TransferEngineError.connectionFailed("Unexpected frame type: \(frameType)")))
+                return
+            }
+
+            let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+            connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, respError in
+                if let respError = respError {
+                    finish(.failure(TransferEngineError.connectionFailed(respError.localizedDescription)))
+                    return
+                }
+                guard let payload = payloadData,
+                      let pairResp = try? JSONDecoder().decode(PairResponseFrame.self, from: payload) else {
+                    finish(.failure(TransferEngineError.manifestRejected("Invalid pair response JSON")))
+                    return
+                }
+
+                guard pairResp.status == "ACCEPTED" else {
+                    finish(.failure(TransferEngineError.manifestRejected("Pairing rejected by peer: \(pairResp.status)")))
+                    return
+                }
+
+                guard let spkiData = Data(base64Encoded: pairResp.serverSpkiBase64),
+                      let peerPublicKey = try? P256.Signing.PublicKey(derRepresentation: spkiData) else {
+                    finish(.failure(TransferEngineError.untrustedPeer("Invalid peer public key SPKI")))
+                    return
+                }
+
+                let computedId = DeviceIdentity.computeIdentity(fromSpki: spkiData)
+                guard computedId == pairResp.serverId else {
+                    finish(.failure(TransferEngineError.untrustedPeer("Peer identity does not match SPKI digest")))
+                    return
+                }
+
+                trustStore.enroll(
+                    identity: pairResp.serverId,
+                    name: pairResp.serverName,
+                    platform: pairResp.serverPlatform,
+                    publicKey: peerPublicKey
+                )
+
+                finish(.success(pairResp))
+            }
+        }
+    }
+
     public func cancelTransfer(id: String) {
         queue.async { [weak self] in
             guard let self = self else { return }
@@ -626,7 +784,87 @@ public final class TransferEngine: @unchecked Sendable {
                 return
             }
 
+            let frameType = data[4]
             let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+
+            if frameType == FrameType.pairRequest.rawValue {
+                connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, reqError in
+                    if let reqError = reqError {
+                        let err = NearsideError(code: .connectionClosed, operation: "readPairRequest", message: reqError.localizedDescription, underlyingError: reqError, correlationId: connectionId)
+                        onComplete(.failure(err))
+                        return
+                    }
+                    guard let payload = payloadData,
+                          let pairReq = try? JSONDecoder().decode(PairRequestFrame.self, from: payload),
+                          let spkiData = Data(base64Encoded: pairReq.clientSpkiBase64),
+                          let clientPublicKey = try? P256.Signing.PublicKey(derRepresentation: spkiData) else {
+                        self.sendError(connection: connection, code: 400, reason: "INVALID_PAIR_REQUEST", detail: "Malformed pair request")
+                        onComplete(.failure(TransferEngineError.manifestRejected("Invalid pair request")))
+                        return
+                    }
+
+                    let computedId = DeviceIdentity.computeIdentity(fromSpki: spkiData)
+                    guard computedId == pairReq.clientId else {
+                        self.sendError(connection: connection, code: 400, reason: "IDENTITY_MISMATCH", detail: "SPKI mismatch")
+                        onComplete(.failure(TransferEngineError.untrustedPeer("Client identity does not match SPKI")))
+                        return
+                    }
+
+                    trustStore.enroll(
+                        identity: pairReq.clientId,
+                        name: pairReq.clientName,
+                        platform: pairReq.clientPlatform,
+                        publicKey: clientPublicKey
+                    )
+
+                    #if os(macOS)
+                    let devName = Host.current().localizedName ?? "Mac"
+                    #else
+                    let devName = UIDevice.current.name
+                    #endif
+
+                    let myIdentity = DeviceIdentity.loadOrCreateDefault()
+                    let resp = PairResponseFrame(
+                        status: "ACCEPTED",
+                        serverId: myIdentity.publicIdentity,
+                        serverName: devName,
+                        serverPlatform: "macos",
+                        serverSpkiBase64: myIdentity.spkiDer.base64EncodedString()
+                    )
+                    guard let respData = try? JSONEncoder().encode(resp) else {
+                        connection.cancel()
+                        return
+                    }
+
+                    var respHeader = Data()
+                    var magicBE = TransferChunk.magic.bigEndian
+                    respHeader.append(Data(bytes: &magicBE, count: 4))
+                    var type = FrameType.pairResponse.rawValue
+                    respHeader.append(Data(bytes: &type, count: 1))
+                    var respLenBE = UInt32(respData.count).bigEndian
+                    respHeader.append(Data(bytes: &respLenBE, count: 4))
+                    respHeader.append(respData)
+
+                    connection.send(content: respHeader, completion: .contentProcessed { _ in
+                        connection.cancel()
+                        let pairRecord = TransferRecord(
+                            id: "pair_\(pairReq.clientId.prefix(8))",
+                            deviceName: pairReq.clientName,
+                            devicePlatform: .android,
+                            direction: .incoming,
+                            filename: "Pairing Handshake",
+                            fileCount: 0,
+                            totalSizeBytes: 0,
+                            progress: 1.0,
+                            status: .completed,
+                            timestamp: Date()
+                        )
+                        onComplete(.success(pairRecord))
+                    })
+                }
+                return
+            }
+
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, manError in
                 if let manError = manError {
                     let err = NearsideError(code: .connectionClosed, operation: "readManifest", message: manError.localizedDescription, underlyingError: manError, correlationId: connectionId)

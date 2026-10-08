@@ -25,14 +25,18 @@ public struct QRPairingPayload: Codable {
     public let hostIdentity: String
     public let hostName: String
     public let sharedSecretBase64: String
+    public let ip: String?
+    public let port: Int?
     public let createdAt: Double
     public let expirySeconds: Double
 
-    public init(hostIdentity: String, hostName: String, expirySeconds: Double = 180.0) {
+    public init(hostIdentity: String, hostName: String, ip: String? = nil, port: Int? = 41433, expirySeconds: Double = 180.0) {
         self.version = 1
         self.sessionId = UUID().uuidString
         self.hostIdentity = hostIdentity
         self.hostName = hostName
+        self.ip = ip
+        self.port = port
         var secretBytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, 32, &secretBytes)
         self.sharedSecretBase64 = Data(secretBytes).base64EncodedString()
@@ -48,13 +52,18 @@ public struct QRPairingPayload: Codable {
         var components = URLComponents()
         components.scheme = "nearside"
         components.host = "pair"
-        components.queryItems = [
+        var items = [
             URLQueryItem(name: "v", value: String(version)),
             URLQueryItem(name: "sid", value: sessionId),
             URLQueryItem(name: "id", value: hostIdentity),
             URLQueryItem(name: "name", value: hostName),
             URLQueryItem(name: "sec", value: sharedSecretBase64)
         ]
+        if let ip = ip, !ip.isEmpty {
+            items.append(URLQueryItem(name: "ip", value: ip))
+            items.append(URLQueryItem(name: "port", value: String(port ?? 41433)))
+        }
+        components.queryItems = items
         return components.string ?? "nearside://pair"
     }
 
@@ -78,6 +87,8 @@ public struct QRPairingPayload: Codable {
 
         let name = dict["name"] ?? "Nearby Peer"
         let version = Int(dict["v"] ?? "1") ?? 1
+        let ip = dict["ip"]
+        let port = dict["port"].flatMap { Int($0) } ?? 41433
 
         return QRPairingPayload(
             version: version,
@@ -85,6 +96,8 @@ public struct QRPairingPayload: Codable {
             hostIdentity: id,
             hostName: name,
             sharedSecretBase64: sec,
+            ip: ip,
+            port: port,
             createdAt: Date().timeIntervalSince1970,
             expirySeconds: 180.0
         )
@@ -96,6 +109,8 @@ public struct QRPairingPayload: Codable {
         hostIdentity: String,
         hostName: String,
         sharedSecretBase64: String,
+        ip: String?,
+        port: Int?,
         createdAt: Double,
         expirySeconds: Double
     ) {
@@ -104,6 +119,8 @@ public struct QRPairingPayload: Codable {
         self.hostIdentity = hostIdentity
         self.hostName = hostName
         self.sharedSecretBase64 = sharedSecretBase64
+        self.ip = ip
+        self.port = port
         self.createdAt = createdAt
         self.expirySeconds = expirySeconds
     }

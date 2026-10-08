@@ -118,12 +118,73 @@ data class ErrorFrame(
     }
 }
 
+data class PairRequestFrame(
+    val clientId: String,
+    val clientName: String,
+    val clientPlatform: String,
+    val clientSpkiBase64: String,
+    val confirmationCode: String,
+    val timestamp: Long = System.currentTimeMillis() / 1000
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("client_id", clientId)
+        put("client_name", clientName)
+        put("client_platform", clientPlatform)
+        put("client_spki_base64", clientSpkiBase64)
+        put("confirmation_code", confirmationCode)
+        put("timestamp", timestamp)
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject): PairRequestFrame = PairRequestFrame(
+            clientId = obj.getString("client_id"),
+            clientName = obj.getString("client_name"),
+            clientPlatform = obj.optString("client_platform", obj.optString("client_os", "unknown")),
+            clientSpkiBase64 = obj.optString("client_spki_base64", obj.optString("ephemeral_public_key", "")),
+            confirmationCode = obj.optString("confirmation_code", ""),
+            timestamp = obj.optLong("timestamp", System.currentTimeMillis() / 1000)
+        )
+    }
+}
+
+data class PairResponseFrame(
+    val status: String,
+    val serverId: String,
+    val serverName: String,
+    val serverPlatform: String,
+    val serverSpkiBase64: String,
+    val timestamp: Long = System.currentTimeMillis() / 1000
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("status", status)
+        put("server_id", serverId)
+        put("server_name", serverName)
+        put("server_platform", serverPlatform)
+        put("server_os", serverPlatform)
+        put("server_spki_base64", serverSpkiBase64)
+        put("timestamp", timestamp)
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject): PairResponseFrame = PairResponseFrame(
+            status = obj.optString("status", "ACCEPTED"),
+            serverId = obj.getString("server_id"),
+            serverName = obj.getString("server_name"),
+            serverPlatform = obj.optString("server_platform", obj.optString("server_os", "unknown")),
+            serverSpkiBase64 = obj.optString("server_spki_base64", obj.optString("ephemeral_public_key", "")),
+            timestamp = obj.optLong("timestamp", System.currentTimeMillis() / 1000)
+        )
+    }
+}
+
 enum class FrameType(val code: Byte) {
     MANIFEST(0x01),
     ACK(0x02),
     CHUNK(0x03),
     ERROR(0x04),
-    COMPLETE(0x05)
+    COMPLETE(0x05),
+    PAIR_REQUEST(0x10.toByte()),
+    PAIR_RESPONSE(0x11.toByte())
 }
 
 data class TransferChunk(

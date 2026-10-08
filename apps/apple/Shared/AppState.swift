@@ -197,26 +197,84 @@ public final class AppState: ObservableObject {
         pairedDevices.append(newDevice)
     }
 
-    public func pairDiscoveredDevice(_ device: NearsideDevice) {
-        let dummyKey = P256.Signing.PrivateKey().publicKey
-        trustStore.enroll(
-            identity: device.id,
-            name: device.name,
-            platform: device.platform.rawValue,
-            publicKey: dummyKey
-        )
-        let newDevice = NearsideDevice(
-            id: device.id,
-            name: device.name,
-            platform: device.platform,
-            fingerprint: device.fingerprint,
-            ipAddress: device.ipAddress,
-            port: device.port,
-            reachability: .online,
-            lastSeen: Date()
-        )
-        pairedDevices.removeAll { $0.id == device.id }
-        pairedDevices.append(newDevice)
+    public func pairDiscoveredDevice(_ device: NearsideDevice, completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
+        var host = device.ipAddress
+        var port = device.port
+        if host == nil || host?.isEmpty == true {
+            if let disc = DiscoveryService.shared.findDiscoveredDevice(identity: device.id) {
+                host = disc.ipAddress
+                port = disc.port
+            }
+        }
+
+        guard let targetHost = host, !targetHost.isEmpty else {
+            completion?(.failure(TransferEngineError.connectionFailed("No IP address for peer")))
+            return
+        }
+
+        TransferEngine.shared.initiatePairing(
+            to: targetHost,
+            port: UInt16(port ?? 41433),
+            confirmationCode: "",
+            deviceIdentity: self.deviceIdentity,
+            deviceName: self.localDeviceName,
+            trustStore: self.trustStore
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let resp):
+                    let newDevice = NearsideDevice(
+                        id: resp.serverId,
+                        name: resp.serverName,
+                        platform: device.platform,
+                        fingerprint: resp.serverId,
+                        ipAddress: targetHost,
+                        port: port,
+                        reachability: .online,
+                        lastSeen: Date()
+                    )
+                    self.pairedDevices.removeAll { $0.id == resp.serverId }
+                    self.pairedDevices.append(newDevice)
+                    completion?(.success(newDevice))
+                case .failure(let error):
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    public func pairWithPeerAddress(host: String, port: UInt16 = 41433, confirmationCode: String = "", completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
+        TransferEngine.shared.initiatePairing(
+            to: host,
+            port: port,
+            confirmationCode: confirmationCode,
+            deviceIdentity: self.deviceIdentity,
+            deviceName: self.localDeviceName,
+            trustStore: self.trustStore
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let resp):
+                    let newDevice = NearsideDevice(
+                        id: resp.serverId,
+                        name: resp.serverName,
+                        platform: .android,
+                        fingerprint: resp.serverId,
+                        ipAddress: host,
+                        port: port,
+                        reachability: .online,
+                        lastSeen: Date()
+                    )
+                    self.pairedDevices.removeAll { $0.id == resp.serverId }
+                    self.pairedDevices.append(newDevice)
+                    completion?(.success(newDevice))
+                case .failure(let error):
+                    completion?(.failure(error))
+                }
+            }
+        }
     }
 
     public func unpairDevice(id: String) {

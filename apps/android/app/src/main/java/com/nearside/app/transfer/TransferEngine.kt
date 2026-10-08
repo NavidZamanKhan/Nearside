@@ -107,6 +107,91 @@ object TransferEngine {
         return Pair(manifest, tempFile)
     }
 
+    suspend fun initiatePairing(
+        host: String,
+        port: Int = 41433,
+        confirmationCode: String = "",
+        trustStore: PinnedTrustStore
+    ): Result<PairResponseFrame> = withContext(Dispatchers.IO) {
+        try {
+            val socket = Socket()
+            socket.connect(java.net.InetSocketAddress(host, port), 5000)
+            socket.soTimeout = 8000
+            socket.tcpNoDelay = true
+
+            val out = DataOutputStream(socket.getOutputStream())
+            val input = DataInputStream(socket.getInputStream())
+
+            val localIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(null)
+            val mySpkiBase64 = try {
+                java.util.Base64.getEncoder().encodeToString(localIdentity.spkiDer)
+            } catch (e: Exception) {
+                android.util.Base64.encodeToString(localIdentity.spkiDer, android.util.Base64.NO_WRAP)
+            }
+
+            val req = PairRequestFrame(
+                clientId = localIdentity.publicIdentity,
+                clientName = android.os.Build.MODEL,
+                clientPlatform = "android",
+                clientSpkiBase64 = mySpkiBase64,
+                confirmationCode = confirmationCode
+            )
+            val reqBytes = req.toJson().toString().toByteArray(Charsets.UTF_8)
+            val buf = ByteBuffer.allocate(9 + reqBytes.size).order(ByteOrder.BIG_ENDIAN)
+            buf.putInt(TransferChunk.MAGIC)
+            buf.put(FrameType.PAIR_REQUEST.code)
+            buf.putInt(reqBytes.size)
+            buf.put(reqBytes)
+            out.write(buf.array())
+            out.flush()
+
+            val magic = input.readInt()
+            if (magic != TransferChunk.MAGIC) {
+                socket.close()
+                return@withContext Result.failure(Exception("Magic mismatch"))
+            }
+            val respType = input.readByte()
+            if (respType != FrameType.PAIR_RESPONSE.code) {
+                socket.close()
+                return@withContext Result.failure(Exception("Unexpected frame type: $respType"))
+            }
+            val len = input.readInt()
+            val respBytes = ByteArray(len)
+            input.readFully(respBytes)
+            socket.close()
+
+            val respObj = JSONObject(String(respBytes, Charsets.UTF_8))
+            val resp = PairResponseFrame.fromJson(respObj)
+            if (resp.status != "ACCEPTED") {
+                return@withContext Result.failure(Exception("Pairing rejected: ${resp.status}"))
+            }
+
+            val serverSpki = try {
+                java.util.Base64.getDecoder().decode(resp.serverSpkiBase64)
+            } catch (e: Exception) {
+                android.util.Base64.decode(resp.serverSpkiBase64, android.util.Base64.NO_WRAP)
+            }
+
+            val computedServerId = com.nearside.app.crypto.DeviceIdentity.computeIdentity(serverSpki)
+            if (computedServerId != resp.serverId) {
+                return@withContext Result.failure(Exception("Server identity mismatch"))
+            }
+
+            val serverPubKey = com.nearside.app.crypto.DeviceIdentity.decodePublicKey(serverSpki)
+            trustStore.enroll(
+                identity = resp.serverId,
+                name = resp.serverName,
+                platform = resp.serverPlatform,
+                publicKey = serverPubKey
+            )
+            NearsideLogger.info("trust", "enroll", "Successfully enrolled paired peer: ${resp.serverName} (${resp.serverId})")
+            Result.success(resp)
+        } catch (e: Exception) {
+            NearsideLogger.error(NearsideError(NearsideErrorCode.CONNECTION_REFUSED, "initiatePairing", e.message ?: "Pairing failed", underlyingError = e))
+            Result.failure(e)
+        }
+    }
+
     suspend fun sendText(
         text: String,
         isUrl: Boolean = false,
@@ -413,8 +498,75 @@ object TransferEngine {
                 return@withContext Result.failure(err)
             }
             val frameType = input.readByte()
-            if (frameType != FrameType.MANIFEST.code) {
-                val err = NearsideError(NearsideErrorCode.PROTOCOL_INVALID_FRAME_TYPE, "handleInboundConnection", "Expected manifest frame, got $frameType", correlationId = connectionId)
+            if (frameType == FrameType.PAIR_REQUEST.code) {
+                val len = input.readInt()
+                val reqBytes = ByteArray(len)
+                input.readFully(reqBytes)
+                val pairReq = PairRequestFrame.fromJson(JSONObject(String(reqBytes, Charsets.UTF_8)))
+
+                val spkiBytes = try {
+                    java.util.Base64.getDecoder().decode(pairReq.clientSpkiBase64)
+                } catch (e: Exception) {
+                    android.util.Base64.decode(pairReq.clientSpkiBase64, android.util.Base64.NO_WRAP)
+                }
+
+                val computedClientId = com.nearside.app.crypto.DeviceIdentity.computeIdentity(spkiBytes)
+                if (computedClientId != pairReq.clientId) {
+                    val err = NearsideError(NearsideErrorCode.TRUST_UNTRUSTED_PEER, "handleInboundConnection", "Pair request SPKI mismatch", correlationId = connectionId)
+                    NearsideLogger.error(err, state = "failed")
+                    socket.close()
+                    return@withContext Result.failure(err)
+                }
+
+                val clientPubKey = com.nearside.app.crypto.DeviceIdentity.decodePublicKey(spkiBytes)
+                trustStore.enroll(
+                    identity = pairReq.clientId,
+                    name = pairReq.clientName,
+                    platform = pairReq.clientPlatform,
+                    publicKey = clientPubKey
+                )
+
+                NearsideLogger.info("trust", "enroll", "Successfully enrolled paired peer: ${pairReq.clientName} (${pairReq.clientId})", correlationId = connectionId)
+
+                val localIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(null)
+                val serverSpkiBase64 = try {
+                    java.util.Base64.getEncoder().encodeToString(localIdentity.spkiDer)
+                } catch (e: Exception) {
+                    android.util.Base64.encodeToString(localIdentity.spkiDer, android.util.Base64.NO_WRAP)
+                }
+
+                val resp = PairResponseFrame(
+                    status = "ACCEPTED",
+                    serverId = localIdentity.publicIdentity,
+                    serverName = android.os.Build.MODEL,
+                    serverPlatform = "android",
+                    serverSpkiBase64 = serverSpkiBase64
+                )
+                val respBytes = resp.toJson().toString().toByteArray(Charsets.UTF_8)
+                val buf = ByteBuffer.allocate(9 + respBytes.size).order(ByteOrder.BIG_ENDIAN)
+                buf.putInt(TransferChunk.MAGIC)
+                buf.put(FrameType.PAIR_RESPONSE.code)
+                buf.putInt(respBytes.size)
+                buf.put(respBytes)
+                out.write(buf.array())
+                out.flush()
+                socket.close()
+
+                val record = TransferRecord(
+                    deviceName = pairReq.clientName,
+                    devicePlatform = DevicePlatform.MACOS,
+                    direction = TransferDirection.INCOMING,
+                    filename = "Pairing Handshake",
+                    fileCount = 0,
+                    totalSizeBytes = 0,
+                    progress = 1.0f,
+                    speedBytesPerSec = 0.0,
+                    etaSeconds = null,
+                    status = TransferStatus.COMPLETED
+                )
+                return@withContext Result.success(record)
+            } else if (frameType != FrameType.MANIFEST.code) {
+                val err = NearsideError(NearsideErrorCode.PROTOCOL_INVALID_FRAME_TYPE, "handleInboundConnection", "Expected manifest or pair frame, got $frameType", correlationId = connectionId)
                 NearsideLogger.error(err, state = "failed")
                 return@withContext Result.failure(err)
             }
