@@ -32,7 +32,11 @@ public final class DiscoveryService: @unchecked Sendable {
             self.localDeviceName = deviceName
             self.isReceivingActive = isReceiving
             self.boundPort = port
-            self.setupListener()
+            if isReceiving {
+                self.setupListener()
+            } else {
+                NearsideLogger.shared.info("discovery", "startAdvertising", "Dormant mode: listener not started on launch to conserve battery", state: "dormant")
+            }
         }
     }
 
@@ -40,7 +44,31 @@ public final class DiscoveryService: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.isReceivingActive = isReceiving
-            self.updateTxtRecord()
+            if isReceiving {
+                NearsideLogger.shared.info("discovery", "updateReceivingStatus", "Receiving activated: spinning up listener and browser", state: "active")
+                self.setupListener()
+                self.setupBrowser()
+            } else {
+                NearsideLogger.shared.info("discovery", "updateReceivingStatus", "Receiving deactivated: tearing down listener and browser for zero battery/resource consumption", state: "dormant")
+                self.listener?.cancel()
+                self.listener = nil
+                self.browser?.cancel()
+                self.browser = nil
+                self.discoveredMap.removeAll()
+                DispatchQueue.main.async { [weak self] in
+                    self?.onDiscoveredDevicesChanged?([])
+                }
+            }
+        }
+    }
+
+    public func ensureBrowsingActive() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if self.browser == nil {
+                NearsideLogger.shared.debug("discovery", "ensureBrowsingActive", "Spinning up browser on-demand for outbound discovery", state: "browsing")
+                self.setupBrowser()
+            }
         }
     }
 

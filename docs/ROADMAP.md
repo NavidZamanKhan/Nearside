@@ -49,4 +49,12 @@ Nearside is an open-source, local-first cross-platform file and content sharing 
 - [x] Direct URL and text ingestion in iOS native Share Extension and Android native Sharesheet target.
 - [x] Automated test suites and cross-platform verification harness (`verify_clipboard_transfer.sh`).
 
-
+### Milestone 7: Premium Visual Experience & Native Applications Polish
+#### Part A: macOS Menu Bar & Resident App Polish (Completed)
+- [x] Zero-resource dormant mode: Complete `NWListener` and `NWBrowser` teardown when receiving is OFF, achieving 0% CPU, zero background multicast traffic, and zero battery drain.
+- [x] Prominent Apple Control Center style Master Switch Hero Card in menu bar popover (`MenuBarShelfView`) with live visual feedback and spring animations.
+- [x] Dynamic menu bar status item icons: Vibrant antenna waves when receiving is ready, muted icon when dormant, and animated indicators during active transfers.
+- [x] Universal Drag-and-Drop Dropzone in menu bar popover with target highlight and instant recipient dispatch.
+- [x] Live transfer metrics: Real-time throughput (MB/s), estimated time remaining (ETA), formatted byte progression, and one-tap in-flight transfer cancellation.
+- [x] Native macOS System Notifications (`MacNotificationManager` via `UNUserNotificationCenter`) with actionable "Show in Finder", "Open", and clipboard copy buttons.
+- [x] Verified zero regressions across macOS build, iOS build, Android tests, diagnostic suites, and clipboard sharing.

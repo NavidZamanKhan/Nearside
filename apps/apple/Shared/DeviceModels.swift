@@ -124,7 +124,8 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
         payloadText: String? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
-        correlationId: String? = nil
+        correlationId: String? = nil,
+        transferSpeedBytesPerSec: Double = 0.0
     ) {
         self.id = id
         self.deviceName = deviceName
@@ -141,12 +142,64 @@ public struct TransferRecord: Identifiable, Codable, Equatable {
         self.errorCode = errorCode
         self.errorMessage = errorMessage
         self.correlationId = correlationId
+        self.transferSpeedBytesPerSec = transferSpeedBytesPerSec
     }
+
+    public var transferSpeedBytesPerSec: Double = 0.0
 
     public var formattedSize: String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useAll]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: totalSizeBytes)
+    }
+
+    public var bytesTransferred: Int64 {
+        return Int64(Double(totalSizeBytes) * progress)
+    }
+
+    public var formattedBytesTransferred: String {
+        return ByteCountFormatter.string(fromByteCount: bytesTransferred, countStyle: .file)
+    }
+
+    public var formattedSpeed: String {
+        guard transferSpeedBytesPerSec > 1024 else { return "" }
+        let mb = transferSpeedBytesPerSec / (1024 * 1024)
+        if mb >= 0.1 {
+            return String(format: "%.1f MB/s", mb)
+        } else {
+            let kb = transferSpeedBytesPerSec / 1024
+            return String(format: "%.0f KB/s", kb)
+        }
+    }
+
+    public var estimatedTimeRemaining: String {
+        guard transferSpeedBytesPerSec > 1024, totalSizeBytes > bytesTransferred else { return "" }
+        let remainingBytes = Double(totalSizeBytes - bytesTransferred)
+        let seconds = remainingBytes / transferSpeedBytesPerSec
+        if seconds < 2 { return "Few seconds left" }
+        if seconds < 60 { return "\(Int(seconds))s left" }
+        let mins = Int(seconds) / 60
+        return "\(mins)m left"
+    }
+
+    public var fileIconName: String {
+        if payloadType == .url { return "link.circle.fill" }
+        if payloadType == .text { return "doc.on.clipboard.fill" }
+        let ext = (filename as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg", "png", "heic", "gif", "webp", "tiff":
+            return "photo.fill"
+        case "mp4", "mov", "m4v", "mkv", "avi":
+            return "video.fill"
+        case "mp3", "m4a", "wav", "flac", "aac":
+            return "music.note"
+        case "zip", "tar", "gz", "bz2", "7z", "dmg", "pkg":
+            return "archivebox.fill"
+        case "pdf":
+            return "doc.richtext.fill"
+        default:
+            return "doc.fill"
+        }
     }
 }

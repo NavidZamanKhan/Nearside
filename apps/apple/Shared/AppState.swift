@@ -160,10 +160,16 @@ public final class AppState: ObservableObject {
                 onProgress: { fraction, record in
                     Task { @MainActor in
                         self.activeTransfer = record
+                        #if os(macOS)
+                        StatusItemController.shared.updateStatusIcon(isReceivingActive: self.isReceivingActive, isTransferring: true)
+                        #endif
                     }
                 },
                 onComplete: { result in
                     Task { @MainActor in
+                        #if os(macOS)
+                        StatusItemController.shared.updateStatusIcon(isReceivingActive: self.isReceivingActive, isTransferring: false)
+                        #endif
                         switch result {
                         case .success(let finished):
                             self.transferHistory.insert(finished, at: 0)
@@ -172,6 +178,9 @@ public final class AppState: ObservableObject {
                                 self.latestReceivedText = finished.payloadText
                                 self.clipboardToastMessage = (finished.payloadType == .url) ? "Received link copied to clipboard" : "Received text copied to clipboard"
                             }
+                            #if os(macOS)
+                            MacNotificationManager.shared.notifyTransferComplete(record: finished, downloadsURL: self.downloadsFolderURL)
+                            #endif
                         case .failure(let error):
                             let nsErr = (error as? NearsideError) ?? (error as? TransferEngineError)?.toNearsideError(operation: "handleInboundConnection") ?? NearsideError(code: .transferInterrupted, operation: "handleInboundConnection", message: error.localizedDescription, underlyingError: error)
                             NearsideLogger.shared.error(nsErr, state: "failed")
@@ -193,12 +202,31 @@ public final class AppState: ObservableObject {
             deviceName: localDeviceName,
             isReceiving: isReceivingActive
         )
-        service.startBrowsing()
+        if isReceivingActive {
+            service.startBrowsing()
+        }
     }
 
     public func toggleReceiving() {
         isReceivingActive.toggle()
         DiscoveryService.shared.updateReceivingStatus(isReceivingActive)
+        #if os(macOS)
+        StatusItemController.shared.updateStatusIcon(isReceivingActive: isReceivingActive, isTransferring: activeTransfer != nil)
+        #endif
+    }
+
+    public func cancelActiveTransfer() {
+        guard let active = activeTransfer else { return }
+        TransferEngine.shared.cancelTransfer(id: active.id)
+        var cancelled = active
+        cancelled.status = .cancelled
+        cancelled.errorCode = NearsideErrorCode.transferCancelled.rawValue
+        cancelled.errorMessage = "Transfer cancelled by user"
+        transferHistory.insert(cancelled, at: 0)
+        activeTransfer = nil
+        #if os(macOS)
+        StatusItemController.shared.updateStatusIcon(isReceivingActive: isReceivingActive, isTransferring: false)
+        #endif
     }
 
     public func pairDevice(identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey) {
@@ -262,17 +290,36 @@ public final class AppState: ObservableObject {
         self.activeTransfer = record
 
         if let ip = device.ipAddress, !ip.isEmpty {
+            DiscoveryService.shared.ensureBrowsingActive()
+            var lastSampleTime = Date()
+            var lastSampleBytes: Int64 = 0
+
             TransferEngine.shared.sendFiles(
                 files: urls,
                 to: device,
                 senderId: localFingerprint,
                 onProgress: { [weak self] fraction, transferred, total in
                     Task { @MainActor in
+                        let now = Date()
+                        let elapsed = now.timeIntervalSince(lastSampleTime)
+                        if elapsed >= 0.25 {
+                            let bytesDelta = transferred - lastSampleBytes
+                            let currentSpeed = Double(bytesDelta) / elapsed
+                            self?.activeTransfer?.transferSpeedBytesPerSec = max(0, currentSpeed)
+                            lastSampleBytes = transferred
+                            lastSampleTime = now
+                        }
                         self?.activeTransfer?.progress = fraction
+                        #if os(macOS)
+                        StatusItemController.shared.updateStatusIcon(isReceivingActive: self?.isReceivingActive ?? true, isTransferring: true)
+                        #endif
                     }
                 },
                 completion: { [weak self] result in
                     Task { @MainActor in
+                        #if os(macOS)
+                        StatusItemController.shared.updateStatusIcon(isReceivingActive: self?.isReceivingActive ?? true, isTransferring: false)
+                        #endif
                         switch result {
                         case .success(let finished):
                             self?.transferHistory.insert(finished, at: 0)

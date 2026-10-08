@@ -7,6 +7,10 @@ public struct MenuBarShelfView: View {
     var onOpenSettings: () -> Void
     var onQuit: () -> Void
 
+    @State private var isDropzoneTargeted: Bool = false
+    @State private var droppedURLs: [URL] = []
+    @State private var showRecipientPicker: Bool = false
+
     public init(
         appState: AppState,
         onOpenSettings: @escaping () -> Void = {},
@@ -19,18 +23,18 @@ public struct MenuBarShelfView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Header
-            headerSection
-                .padding(.horizontal, 16)
+            // Header & Master Receiving Switch Hero Card
+            headerHeroCard
+                .padding(.horizontal, 14)
                 .padding(.top, 14)
-                .padding(.bottom, 12)
+                .padding(.bottom, 10)
 
             Divider()
 
             // Active Transfer Live Progress (if running)
             if let active = appState.activeTransfer {
-                activeTransferSection(record: active)
-                    .padding(.horizontal, 16)
+                activeTransferCard(record: active)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 Divider()
             }
@@ -55,82 +59,193 @@ public struct MenuBarShelfView: View {
             // Main scrollable content
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
+                    // Universal Quick Dropzone
+                    universalDropzoneCard
+
+                    // Available Peers
                     nearbyDevicesSection
+
+                    // Recent Transfers History
                     recentTransfersSection
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 14)
                 .padding(.vertical, 12)
             }
-            .frame(maxHeight: 360)
+            .frame(maxHeight: 380)
 
             Divider()
 
             // Footer Toolbar
             footerToolbar
                 .padding(.horizontal, 14)
-                .padding(.vertical, 9)
+                .padding(.vertical, 10)
         }
-        .frame(width: 340)
+        .frame(width: 350)
+        .sheet(isPresented: $showRecipientPicker) {
+            recipientPickerSheet
+        }
     }
 
-    // MARK: - Header
-    private var headerSection: some View {
-        HStack(alignment: .center) {
+    // MARK: - Master Switch Hero Card
+    private var headerHeroCard: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(appState.isReceivingActive ? Color.green.opacity(0.2) : Color.secondary.opacity(0.12))
+                    .frame(width: 38, height: 38)
+                Image(systemName: appState.isReceivingActive ? "antenna.radiowaves.left.and.right" : "moon.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(appState.isReceivingActive ? .green : .secondary)
+            }
+
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("Nearside")
-                        .font(.system(size: 14, weight: .bold))
+                    Text("Nearside Receiving")
+                        .font(.system(size: 13, weight: .bold))
                     Circle()
-                        .fill(appState.isReceivingActive ? Color.green : Color.orange)
-                        .frame(width: 7, height: 7)
+                        .fill(appState.isReceivingActive ? Color.green : Color.secondary.opacity(0.5))
+                        .frame(width: 6, height: 6)
                 }
-                Text(appState.localDeviceName)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Text(appState.isReceivingActive ? "Ready • Listening on port 41433" : "Dormant • 0% CPU • Zero Battery")
+                    .font(.system(size: 10))
+                    .foregroundColor(appState.isReceivingActive ? .secondary : Color.secondary.opacity(0.8))
             }
 
             Spacer()
 
-            Button(action: {
-                appState.toggleReceiving()
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: appState.isReceivingActive ? "antenna.radiowaves.left.and.right" : "moon.fill")
-                        .font(.system(size: 10))
-                    Text(appState.isReceivingActive ? "Receiving" : "Paused")
-                        .font(.system(size: 11, weight: .medium))
+            Toggle("", isOn: Binding(
+                get: { appState.isReceivingActive },
+                set: { _ in
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        appState.toggleReceiving()
+                    }
                 }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .controlSize(.mini)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(appState.isReceivingActive ? Color.green.opacity(0.25) : Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Universal Drag & Drop Dropzone
+    private var universalDropzoneCard: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: isDropzoneTargeted ? "arrow.down.doc.fill" : "square.and.arrow.up")
+                    .font(.system(size: 14))
+                    .foregroundColor(isDropzoneTargeted ? .accentColor : .secondary)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(isDropzoneTargeted ? "Release to Send Files" : "Drop files here to send")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(isDropzoneTargeted ? .accentColor : .primary)
+                    Text("Or right-click any file in Finder -> Share -> Nearside")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(appState.isReceivingActive ? .green : .orange)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isDropzoneTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .quaternaryLabelColor).opacity(0.2))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isDropzoneTargeted ? Color.accentColor : Color.secondary.opacity(0.25),
+                    style: StrokeStyle(lineWidth: 1, dash: [4, 4])
+                )
+        )
+        .onDrop(of: [.fileURL], isTargeted: $isDropzoneTargeted) { providers in
+            handleDroppedFiles(providers: providers)
+            return true
         }
     }
 
-    // MARK: - Active Transfer
-    private func activeTransferSection(record: TransferRecord) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Image(systemName: "arrow.up.circle.fill")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundColor(.accentColor)
-                    .font(.system(size: 14))
+    // MARK: - Active Transfer Card
+    private func activeTransferCard(record: TransferRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.15))
+                        .frame(width: 32, height: 32)
+                    Image(systemName: record.fileIconName)
+                        .font(.system(size: 14))
+                        .foregroundColor(.accentColor)
+                }
 
-                Text("Sending to \(record.deviceName)...")
-                    .font(.system(size: 12, weight: .medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(record.direction == .outgoing ? "Sending to" : "Receiving from")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text(record.deviceName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+                    Text(record.filename)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                }
+
                 Spacer()
-                Text("\(Int(record.progress * 100))%")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
+
+                Button(action: {
+                    appState.cancelActiveTransfer()
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Cancel Transfer")
             }
-            Text(record.filename)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+
             ProgressView(value: record.progress)
                 .progressViewStyle(.linear)
                 .controlSize(.small)
+
+            HStack {
+                Text("\(record.formattedBytesTransferred) of \(record.formattedSize)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                if !record.formattedSpeed.isEmpty {
+                    Text(record.formattedSpeed)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                }
+
+                if !record.estimatedTimeRemaining.isEmpty {
+                    Text("• \(record.estimatedTimeRemaining)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            }
         }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+        )
     }
 
     // MARK: - Nearby Devices Section
@@ -145,19 +260,23 @@ public struct MenuBarShelfView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 2)
 
             if appState.discoveredDevices.isEmpty {
-                HStack {
-                    Spacer()
+                VStack(spacing: 4) {
                     Text("No nearby devices advertising")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        .padding(.vertical, 10)
-                    Spacer()
+                    if !appState.isReceivingActive {
+                        Text("Turn on Receiving above to discover peers on Wi-Fi")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
                 }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
             } else {
-                VStack(spacing: 2) {
+                VStack(spacing: 4) {
                     ForEach(appState.discoveredDevices) { device in
                         DeviceRowView(
                             device: device,
@@ -188,7 +307,7 @@ public struct MenuBarShelfView: View {
                     .buttonStyle(.borderless)
                 }
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 2)
 
             if appState.transferHistory.isEmpty {
                 HStack {
@@ -200,7 +319,7 @@ public struct MenuBarShelfView: View {
                     Spacer()
                 }
             } else {
-                VStack(spacing: 2) {
+                VStack(spacing: 3) {
                     ForEach(appState.transferHistory) { record in
                         TransferRowView(
                             record: record,
@@ -239,6 +358,101 @@ public struct MenuBarShelfView: View {
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.borderless)
+        }
+    }
+
+    // MARK: - Recipient Picker Sheet
+    private var recipientPickerSheet: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Select Recipient")
+                    .font(.system(size: 13, weight: .bold))
+                Spacer()
+                Button("Cancel") {
+                    showRecipientPicker = false
+                    droppedURLs.removeAll()
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
+
+            Text("\(droppedURLs.count) file(s) selected")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider()
+
+            if appState.discoveredDevices.isEmpty {
+                Text("No paired devices found nearby")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 20)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(appState.discoveredDevices) { device in
+                        Button(action: {
+                            let urls = droppedURLs
+                            showRecipientPicker = false
+                            droppedURLs.removeAll()
+                            appState.sendFiles(urls: urls, to: device)
+                        }) {
+                            HStack(spacing: 10) {
+                                Image(systemName: device.platform.systemSymbolName)
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.accentColor)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(device.name)
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(device.platform.displayName)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.accentColor)
+                            }
+                            .padding(8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.3))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 300)
+    }
+
+    private func handleDroppedFiles(providers: [NSItemProvider]) {
+        let group = DispatchGroup()
+        var urls: [URL] = []
+        let lock = NSLock()
+
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let fileURL = url {
+                    lock.lock()
+                    urls.append(fileURL)
+                    lock.unlock()
+                }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            guard !urls.isEmpty else { return }
+            if self.appState.discoveredDevices.count == 1, let singleDevice = self.appState.discoveredDevices.first {
+                self.appState.sendFiles(urls: urls, to: singleDevice)
+            } else {
+                self.droppedURLs = urls
+                self.showRecipientPicker = true
+            }
         }
     }
 
@@ -347,18 +561,14 @@ private struct TransferRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            let iconName: String = {
-                if record.payloadType == .url { return "link.circle.fill" }
-                if record.payloadType == .text { return "doc.on.clipboard.fill" }
-                return record.direction == .incoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill"
-            }()
             let iconColor: Color = {
+                if record.status == .failed || record.status == .cancelled { return .red }
                 if record.payloadType == .url { return .blue }
                 if record.payloadType == .text { return .purple }
                 return record.direction == .incoming ? .green : .accentColor
             }()
 
-            Image(systemName: iconName)
+            Image(systemName: record.fileIconName)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundColor(iconColor)
                 .font(.system(size: 15))
@@ -371,6 +581,12 @@ private struct TransferRowView: View {
                     Text(record.deviceName)
                     Text("•")
                     Text(record.formattedSize)
+                    if let code = record.errorCode {
+                        Text("•")
+                        Text(code)
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.red)
+                    }
                 }
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -388,7 +604,7 @@ private struct TransferRowView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Open in Browser")
-            } else if record.direction == .incoming {
+            } else if record.direction == .incoming && record.status == .completed {
                 Button(action: {
                     NSWorkspace.shared.activateFileViewerSelecting([
                         downloadsURL.appendingPathComponent(record.filename)

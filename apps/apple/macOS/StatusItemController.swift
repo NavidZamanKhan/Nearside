@@ -16,12 +16,12 @@ public final class StatusItemController: NSObject {
     public func setup() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "arrow.left.arrow.right.circle", accessibilityDescription: "Nearside")
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         self.statusItem = item
+        updateStatusIcon(isReceivingActive: AppState.shared.isReceivingActive, isTransferring: false)
 
         let pop = NSPopover()
         pop.contentSize = NSSize(width: 350, height: 420)
@@ -76,5 +76,16 @@ public final class StatusItemController: NSObject {
 
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    public func updateStatusIcon(isReceivingActive: Bool, isTransferring: Bool) {
+        guard let button = statusItem?.button else { return }
+        if isTransferring {
+            button.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath.circle.fill", accessibilityDescription: "Nearside Transferring")
+        } else if isReceivingActive {
+            button.image = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "Nearside Receiving Ready")
+        } else {
+            button.image = NSImage(systemSymbolName: "arrow.left.arrow.right.circle", accessibilityDescription: "Nearside Dormant (Off)")
+        }
     }
 }

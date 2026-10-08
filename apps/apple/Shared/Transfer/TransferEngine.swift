@@ -159,6 +159,16 @@ public final class TransferEngine: @unchecked Sendable {
         )
     }
 
+    public func cancelTransfer(id: String) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if let conn = self.activeConnections.removeValue(forKey: id) {
+                conn.cancel()
+                NearsideLogger.shared.info("transfer", "cancelTransfer", "Transfer cancelled by user", correlationId: id)
+            }
+        }
+    }
+
     public func sendFiles(
         files: [URL],
         to device: NearsideDevice,
