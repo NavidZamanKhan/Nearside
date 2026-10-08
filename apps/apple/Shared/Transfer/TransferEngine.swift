@@ -318,10 +318,20 @@ public final class TransferEngine: @unchecked Sendable {
                     }
                 }
 
+                var timeoutItem: DispatchWorkItem? = DispatchWorkItem { [weak self] in
+                    guard self != nil else { return }
+                    handleAttemptFailure(error: TransferEngineError.connectionFailed("Connection timed out after 5 seconds"))
+                }
+                if let item = timeoutItem {
+                    self.queue.asyncAfter(deadline: .now() + 5.0, execute: item)
+                }
+
                 connection.stateUpdateHandler = { [weak self] state in
                     guard let self = self else { return }
                     switch state {
                     case .ready:
+                        timeoutItem?.cancel()
+                        timeoutItem = nil
                         NearsideLogger.shared.info(
                             "connection",
                             "stateUpdate",
@@ -360,7 +370,13 @@ public final class TransferEngine: @unchecked Sendable {
                                 }
                             }
                         )
+                    case .waiting(let err):
+                        timeoutItem?.cancel()
+                        timeoutItem = nil
+                        handleAttemptFailure(error: TransferEngineError.connectionFailed("Peer unreachable: \(err.localizedDescription)"))
                     case .failed(let err):
+                        timeoutItem?.cancel()
+                        timeoutItem = nil
                         handleAttemptFailure(error: TransferEngineError.connectionFailed(err.localizedDescription))
                     default:
                         break
@@ -443,28 +459,59 @@ public final class TransferEngine: @unchecked Sendable {
     }
 
     private func receiveAck(connection: NWConnection, completion: @escaping (Result<TransferAck, Error>) -> Void) {
+        var completed = false
+        let lock = NSLock()
+
+        var timerItem: DispatchWorkItem? = DispatchWorkItem {
+            lock.lock()
+            guard !completed else {
+                lock.unlock()
+                return
+            }
+            completed = true
+            lock.unlock()
+            completion(.failure(TransferEngineError.connectionFailed("Target device did not respond within 5s. Ensure Nearside is open and receiving on the device.")))
+        }
+
+        if let item = timerItem {
+            self.queue.asyncAfter(deadline: .now() + 5.0, execute: item)
+        }
+
+        func finish(_ result: Result<TransferAck, Error>) {
+            lock.lock()
+            guard !completed else {
+                lock.unlock()
+                return
+            }
+            completed = true
+            timerItem?.cancel()
+            timerItem = nil
+            lock.unlock()
+            completion(result)
+        }
+
         connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { headerData, _, isComplete, error in
             if let error = error {
-                completion(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                finish(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
                 return
             }
             guard let data = headerData, data.count == 9 else {
-                completion(.failure(TransferEngineError.connectionFailed("Truncated ACK header")))
+                finish(.failure(TransferEngineError.connectionFailed("Truncated ACK header")))
                 return
             }
 
             let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, ackError in
                 if let ackError = ackError {
-                    completion(.failure(TransferEngineError.connectionFailed(ackError.localizedDescription)))
+                    finish(.failure(TransferEngineError.connectionFailed(ackError.localizedDescription)))
                     return
                 }
                 guard let payload = payloadData,
                       let ack = try? JSONDecoder().decode(TransferAck.self, from: payload) else {
-                    completion(.failure(TransferEngineError.connectionFailed("Malformed ACK payload")))
+                    finish(.failure(TransferEngineError.connectionFailed("Malformed ACK payload")))
                     return
                 }
-                completion(.success(ack))
+                finish(.success(ack))
             }
         }
     }

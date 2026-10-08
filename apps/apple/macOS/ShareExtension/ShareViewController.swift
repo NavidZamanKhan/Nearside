@@ -69,6 +69,11 @@ public final class ShareExtensionViewModel: ObservableObject {
         DiscoveryService.shared.ensureBrowsingActive()
     }
 
+    public func rescanDevices() {
+        self.loadEnrolledDevices()
+        DiscoveryService.shared.startBrowsing()
+    }
+
     public func extractFiles(from items: [NSExtensionItem]) async {
         isExtracting = true
         extractionError = nil
@@ -95,6 +100,14 @@ public final class ShareExtensionViewModel: ObservableObject {
         }
 
         self.stagedURLs = urls
+        var total: Int64 = 0
+        for u in urls {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
+               let size = attrs[.size] as? Int64 {
+                total += size
+            }
+        }
+        self.totalBytes = total
         self.isExtracting = false
     }
 
@@ -312,8 +325,8 @@ public final class ShareViewController: NSViewController {
     private var hostingController: NSHostingController<ShareRecipientPickerView>?
 
     public override func loadView() {
-        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 230))
-        self.preferredContentSize = NSSize(width: 360, height: 230)
+        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 280))
+        self.preferredContentSize = NSSize(width: 440, height: 280)
     }
 
     public override func viewDidLoad() {
