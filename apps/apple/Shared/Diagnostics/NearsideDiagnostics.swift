@@ -218,6 +218,7 @@ public final class NearsideLogger: @unchecked Sendable {
             handler(line)
         } else {
             print(line)
+            fflush(stdout)
         }
         lock.unlock()
     }

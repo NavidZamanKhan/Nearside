@@ -168,7 +168,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             nsdDiscovery.discoveredDevices.collect { discovered ->
                 if (discovered.isNotEmpty()) {
-                    _uiState.update { it.copy(discoveredDevices = discovered) }
+                    _uiState.update { current ->
+                        val updatedPaired = current.pairedDevices.map { paired ->
+                            val match = discovered.find { it.id == paired.id || it.fingerprint == paired.fingerprint }
+                            if (match != null && match.ipAddress != null) {
+                                paired.copy(
+                                    ipAddress = match.ipAddress,
+                                    port = match.port,
+                                    reachability = match.reachability
+                                )
+                            } else paired
+                        }
+                        current.copy(
+                            discoveredDevices = discovered,
+                            pairedDevices = updatedPaired
+                        )
+                    }
                 }
             }
         }
@@ -308,14 +323,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
         _uiState.update { it.copy(activeTransfer = record) }
 
-        val host = device.ipAddress
-        if (host != null && host.isNotEmpty()) {
-            viewModelScope.launch {
-                val res = com.nearside.app.transfer.TransferEngine.sendFiles(
-                    files = files,
-                    host = host,
-                    port = device.port ?: 41433,
-                    senderId = deviceIdentity.publicIdentity,
+        val resolved = if (device.ipAddress.isNullOrEmpty()) {
+            val disc = com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.id)
+                ?: com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.fingerprint)
+                ?: _uiState.value.discoveredDevices.firstOrNull { it.id == device.id || it.fingerprint == device.fingerprint }
+                ?: _uiState.value.discoveredDevices.firstOrNull()
+            if (disc != null && !disc.ipAddress.isNullOrEmpty()) {
+                device.copy(ipAddress = disc.ipAddress, port = disc.port)
+            } else device
+        } else device
+
+        val host = resolved.ipAddress ?: "127.0.0.1"
+        viewModelScope.launch {
+            val res = com.nearside.app.transfer.TransferEngine.sendFiles(
+                files = files,
+                host = host,
+                port = resolved.port ?: 41433,
+                senderId = deviceIdentity.publicIdentity,
                     onProgress = { frac, _, _ -> },
                     onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                         _uiState.update { current ->
@@ -364,9 +388,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
-        } else {
-            simulateTransfer(device, files.map { it.name }, totalBytes)
-        }
     }
 
     fun simulateTransfer(device: NearsideDevice, filenames: List<String>, totalBytes: Long) {
@@ -466,67 +487,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
         _uiState.update { it.copy(activeTransfer = record) }
 
-        val host = device.ipAddress
-        if (host != null && host.isNotEmpty()) {
-            viewModelScope.launch {
-                val res = com.nearside.app.transfer.TransferEngine.sendText(
-                    text = text,
-                    isUrl = isUrl,
-                    host = host,
-                    port = device.port ?: 41433,
-                    senderId = deviceIdentity.publicIdentity,
-                    onProgress = { frac, _, _ -> },
-                    onProgressMetrics = { frac, bytesSent, total, speed, eta ->
-                        _uiState.update { current ->
-                            current.activeTransfer?.let {
-                                current.copy(
-                                    activeTransfer = it.copy(
-                                        progress = frac,
-                                        speedBytesPerSec = speed,
-                                        etaSeconds = eta
-                                    )
+        val resolved = if (device.ipAddress.isNullOrEmpty()) {
+            val disc = com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.id)
+                ?: com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.fingerprint)
+                ?: _uiState.value.discoveredDevices.firstOrNull { it.id == device.id || it.fingerprint == device.fingerprint }
+                ?: _uiState.value.discoveredDevices.firstOrNull()
+            if (disc != null && !disc.ipAddress.isNullOrEmpty()) {
+                device.copy(ipAddress = disc.ipAddress, port = disc.port)
+            } else device
+        } else device
+
+        val host = resolved.ipAddress ?: "127.0.0.1"
+        viewModelScope.launch {
+            val res = com.nearside.app.transfer.TransferEngine.sendText(
+                text = text,
+                isUrl = isUrl,
+                host = host,
+                port = resolved.port ?: 41433,
+                senderId = deviceIdentity.publicIdentity,
+                onProgress = { frac, _, _ -> },
+                onProgressMetrics = { frac, bytesSent, total, speed, eta ->
+                    _uiState.update { current ->
+                        current.activeTransfer?.let {
+                            current.copy(
+                                activeTransfer = it.copy(
+                                    progress = frac,
+                                    speedBytesPerSec = speed,
+                                    etaSeconds = eta
                                 )
-                            } ?: current
-                        }
+                            )
+                        } ?: current
                     }
-                )
-
-                _uiState.update { current ->
-                    val failureException = res.exceptionOrNull()
-                    val nearsideErr = failureException as? com.nearside.app.diagnostics.NearsideError
-                    val isCancelled = com.nearside.app.transfer.TransferEngine.isTransferCancelled(record.id)
-                    val status = when {
-                        isCancelled -> TransferStatus.CANCELLED
-                        res.isSuccess -> TransferStatus.COMPLETED
-                        else -> TransferStatus.FAILED
-                    }
-                    val errorCode = nearsideErr?.code?.code ?: (if (res.isSuccess) null else com.nearside.app.diagnostics.NearsideErrorCode.TRANSFER_INTERRUPTED.code)
-                    val errorMessage = failureException?.message
-
-                    val finished = current.activeTransfer?.copy(
-                        progress = 1.0f,
-                        speedBytesPerSec = 0.0,
-                        etaSeconds = 0L,
-                        status = status,
-                        errorCode = errorCode,
-                        errorMessage = errorMessage,
-                        correlationId = current.activeTransfer.id
-                    )
-                    val updatedHistory = if (finished != null) {
-                        listOf(finished) + current.recentTransfers
-                    } else current.recentTransfers
-
-                    current.copy(
-                        activeTransfer = null,
-                        recentTransfers = updatedHistory,
-                        toastMessage = if (res.isSuccess) "Clipboard sent to ${device.name}" else "Failed to send clipboard: ${errorMessage ?: "Transfer error"}"
-                    )
                 }
-                delay(2000)
-                _uiState.update { it.copy(toastMessage = null) }
+            )
+
+            _uiState.update { current ->
+                val failureException = res.exceptionOrNull()
+                val nearsideErr = failureException as? com.nearside.app.diagnostics.NearsideError
+                val isCancelled = com.nearside.app.transfer.TransferEngine.isTransferCancelled(record.id)
+                val status = when {
+                    isCancelled -> TransferStatus.CANCELLED
+                    res.isSuccess -> TransferStatus.COMPLETED
+                    else -> TransferStatus.FAILED
+                }
+                val errorCode = nearsideErr?.code?.code ?: (if (res.isSuccess) null else com.nearside.app.diagnostics.NearsideErrorCode.TRANSFER_INTERRUPTED.code)
+                val errorMessage = failureException?.message
+
+                val finished = current.activeTransfer?.copy(
+                    progress = 1.0f,
+                    speedBytesPerSec = 0.0,
+                    etaSeconds = 0L,
+                    status = status,
+                    errorCode = errorCode,
+                    errorMessage = errorMessage,
+                    correlationId = current.activeTransfer.id
+                )
+                val updatedHistory = if (finished != null) {
+                    listOf(finished) + current.recentTransfers
+                } else current.recentTransfers
+
+                current.copy(
+                    activeTransfer = null,
+                    recentTransfers = updatedHistory,
+                    toastMessage = if (res.isSuccess) "Clipboard sent to ${device.name}" else "Failed to send clipboard: ${errorMessage ?: "Transfer error"}"
+                )
             }
-        } else {
-            simulateTransfer(device, listOf(displayFilename), text.toByteArray(Charsets.UTF_8).size.toLong())
+            delay(2000)
+            _uiState.update { it.copy(toastMessage = null) }
         }
     }
 

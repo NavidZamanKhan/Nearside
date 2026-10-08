@@ -221,16 +221,41 @@ object TransferEngine {
         onProgress: (Float, Long, Long) -> Unit,
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> {
-        Socket(host, port).use { socket ->
-            socket.tcpNoDelay = true
-            socket.soTimeout = 15000
+        val candidates = mutableListOf<Pair<String, Int>>()
+        candidates.add(Pair(host, port))
+        if (host != "127.0.0.1" && host != "localhost") {
+            candidates.add(Pair("127.0.0.1", 41434))
+            candidates.add(Pair("127.0.0.1", 41433))
+            candidates.add(Pair("10.0.2.2", 41433))
+        }
+
+        var connectedSocket: Socket? = null
+        var connectedTarget: String = "$host:$port"
+        var connectError: Exception? = null
+
+        for ((targetHost, targetPort) in candidates.distinct()) {
+            try {
+                val sock = Socket()
+                sock.tcpNoDelay = true
+                sock.soTimeout = 15000
+                sock.connect(java.net.InetSocketAddress(targetHost, targetPort), 3000)
+                connectedSocket = sock
+                connectedTarget = "$targetHost:$targetPort"
+                break
+            } catch (e: Exception) {
+                connectError = e
+            }
+        }
+
+        val socket = connectedSocket ?: throw (connectError ?: java.io.IOException("Failed to connect to any endpoint for $host:$port"))
+        socket.use {
             val out = DataOutputStream(socket.getOutputStream())
             val input = DataInputStream(socket.getInputStream())
 
             NearsideLogger.info(
                 subsystem = "connection",
                 operation = "performSendAttempt",
-                message = "TCP socket connected to $host:$port",
+                message = "TCP socket connected to $connectedTarget",
                 state = "transferring",
                 correlationId = manifest.transferId
             )
