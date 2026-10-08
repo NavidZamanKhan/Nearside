@@ -119,6 +119,9 @@ public final class PinnedTrustStore {
         }
 
         for record in records {
+            if record.name == "Loopback Sender" || record.identity.contains("test") {
+                continue
+            }
             if let spkiData = Data(base64Encoded: record.spkiBase64),
                let pubKey = try? P256.Signing.PublicKey(derRepresentation: spkiData) {
                 enrolledKeys[record.identity] = pubKey

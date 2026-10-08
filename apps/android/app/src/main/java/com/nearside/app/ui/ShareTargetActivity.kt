@@ -47,6 +47,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nearside.app.crypto.PinnedTrustStore
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.NearsideDevice
 import com.nearside.app.ui.theme.NearsideBlue
@@ -61,25 +62,25 @@ class ShareTargetActivity : ComponentActivity() {
 
         val sharedSummary = parseIncomingShareIntent(intent)
 
-        // Mock paired devices for fast Sharesheet picker
-        val knownDevices = listOf(
+        val trustStore = PinnedTrustStore(this)
+        val knownDevices = trustStore.allEnrolledPeers().map { record ->
+            val platform = when (record.platformRaw.lowercase()) {
+                "macos" -> DevicePlatform.MACOS
+                "android" -> DevicePlatform.ANDROID
+                "ios" -> DevicePlatform.IOS
+                "windows" -> DevicePlatform.WINDOWS
+                "linux" -> DevicePlatform.LINUX
+                else -> DevicePlatform.ANDROID
+            }
             NearsideDevice(
-                id = "dev_macbook_pro",
-                name = "MacBook Pro",
-                platform = DevicePlatform.MACOS,
-                fingerprint = "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
-                ipAddress = "192.168.0.104",
-                port = 41433
-            ),
-            NearsideDevice(
-                id = "dev_ipad_air",
-                name = "iPad Air",
-                platform = DevicePlatform.IOS,
-                fingerprint = "ns1_c5e891b00142fa9166da23491f08cb34",
-                ipAddress = "192.168.0.108",
+                id = record.identity,
+                name = record.name,
+                platform = platform,
+                fingerprint = record.identity,
+                ipAddress = "",
                 port = 41433
             )
-        )
+        }
 
         setContent {
             NearsideTheme {
@@ -203,21 +204,29 @@ fun SharePickerSheet(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    items(devices, key = { it.id }) { device ->
-                        RecipientDeviceTile(
-                            device = device,
-                            onClick = {
-                                transferringDevice = device
-                                scope.launch {
-                                    delay(1000)
-                                    onDeviceSelected(device)
+                if (devices.isEmpty()) {
+                    Text(
+                        text = "No paired devices found. Pair a device in Nearside first.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(devices, key = { it.id }) { device ->
+                            RecipientDeviceTile(
+                                device = device,
+                                onClick = {
+                                    transferringDevice = device
+                                    scope.launch {
+                                        delay(1000)
+                                        onDeviceSelected(device)
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
             }

@@ -24,17 +24,7 @@ public final class ShareExtensionViewModel: ObservableObject {
     private var stagingDirectory: URL? = nil
 
     public init() {
-        let defaultPhone = NearsideDevice(
-            id: "ns1_0859d384629f7bb1e9a809502e693103c865c1b411ae565eb053a97b3b43d888",
-            name: "iQOO Neo9",
-            platform: .android,
-            fingerprint: "ns1_0859d384629f7bb1e9a809502e693103c865c1b411ae565eb053a97b3b43d888",
-            ipAddress: "192.168.0.100",
-            port: 41433,
-            reachability: .online,
-            lastSeen: Date()
-        )
-        self.devices = [defaultPhone]
+        self.devices = []
         self.loadEnrolledDevices()
         self.startDiscovery()
     }
@@ -42,23 +32,21 @@ public final class ShareExtensionViewModel: ObservableObject {
     private func loadEnrolledDevices() {
         let store = PinnedTrustStore()
         let peers = store.allEnrolledPeers()
-        var updated = self.devices
+        var updated: [NearsideDevice] = []
         for p in peers {
-            if !updated.contains(where: { $0.id == p.identity }) {
-                let platform: DevicePlatform = (p.platformRaw.lowercased() == "android") ? .android : .macOS
-                updated.append(
-                    NearsideDevice(
-                        id: p.identity,
-                        name: p.name,
-                        platform: platform,
-                        fingerprint: p.identity,
-                        ipAddress: "192.168.0.100",
-                        port: 41433,
-                        reachability: .online,
-                        lastSeen: Date()
-                    )
+            let platform: DevicePlatform = (p.platformRaw.lowercased() == "android") ? .android : .macOS
+            updated.append(
+                NearsideDevice(
+                    id: p.identity,
+                    name: p.name,
+                    platform: platform,
+                    fingerprint: p.identity,
+                    ipAddress: "192.168.0.100",
+                    port: 41433,
+                    reachability: .online,
+                    lastSeen: Date()
                 )
-            }
+            )
         }
         self.devices = updated
     }

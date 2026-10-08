@@ -75,81 +75,18 @@ public final class AppState: ObservableObject {
                 )
             }
         } else {
-            // Initial seed for immediate visibility before first live pairing
-            self.pairedDevices = [
-                NearsideDevice(
-                    id: "dev_iqoo_neo9",
-                    name: "iQOO Neo9",
-                    platform: .android,
-                    fingerprint: "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
-                    ipAddress: "192.168.0.101",
-                    port: 41433,
-                    reachability: .online,
-                    lastSeen: Date()
-                ),
-                NearsideDevice(
-                    id: "dev_ipad_pro",
-                    name: "iPad Air",
-                    platform: .iOS,
-                    fingerprint: "ns1_c5e891b00142fa9166da23491f08cb34",
-                    ipAddress: "192.168.0.108",
-                    port: 41433,
-                    reachability: .unreachable,
-                    lastSeen: Date().addingTimeInterval(-86400 * 2)
-                )
-            ]
+            self.pairedDevices = []
         }
 
-        // Initial discovered peers fallback seed
-        self.discoveredDevices = [
-            NearsideDevice(
-                id: "dev_iqoo_neo9",
-                name: "iQOO Neo9",
-                platform: .android,
-                fingerprint: "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
-                ipAddress: "192.168.0.101",
-                port: 41433,
-                reachability: .online,
-                lastSeen: Date()
-            )
-        ]
-
-        // Transfer history initial body seed
-        self.transferHistory = [
-            TransferRecord(
-                id: "tx_001",
-                deviceName: "iQOO Neo9",
-                devicePlatform: .android,
-                direction: .outgoing,
-                filename: "presentation_final.pdf",
-                fileCount: 1,
-                totalSizeBytes: 14_850_000,
-                progress: 1.0,
-                status: .completed,
-                timestamp: Date().addingTimeInterval(-1800)
-            ),
-            TransferRecord(
-                id: "tx_002",
-                deviceName: "iQOO Neo9",
-                devicePlatform: .android,
-                direction: .incoming,
-                filename: "IMG_20261001_214530.jpg",
-                fileCount: 4,
-                totalSizeBytes: 38_200_000,
-                progress: 1.0,
-                status: .completed,
-                timestamp: Date().addingTimeInterval(-7200)
-            )
-        ]
+        self.discoveredDevices = []
+        self.transferHistory = []
     }
 
     public func startDiscoveryEngine() {
         let service = DiscoveryService.shared
         service.onDiscoveredDevicesChanged = { [weak self] devices in
             guard let self = self else { return }
-            if !devices.isEmpty {
-                self.discoveredDevices = devices
-            }
+            self.discoveredDevices = devices
         }
         service.onInboundConnection = { [weak self] connection in
             guard let self = self else { return }

@@ -44,6 +44,7 @@ xcrun swiftc -O \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
     apps/apple/Shared/Crypto/PinnedTrustStore.swift \
+    apps/apple/Shared/Discovery/DiscoveryService.swift \
     apps/apple/Shared/Transfer/TransferProtocol.swift \
     apps/apple/Shared/Transfer/TransferEngine.swift \
     apps/apple/Tests/ClipboardTransferTests.swift \

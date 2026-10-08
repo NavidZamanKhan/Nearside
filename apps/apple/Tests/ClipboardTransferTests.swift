@@ -98,7 +98,8 @@ struct ClipboardTransferTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let senderIdentity = DeviceIdentity()
-        let trustStore = PinnedTrustStore()
+        let storeURL = tempDir.appendingPathComponent("test_trust_store.json")
+        let trustStore = PinnedTrustStore(customStorageURL: storeURL)
         trustStore.enroll(
             identity: senderIdentity.publicIdentity,
             name: "Loopback Sender",
@@ -185,7 +186,8 @@ struct ClipboardTransferTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let senderIdentity = DeviceIdentity()
-        let trustStore = PinnedTrustStore()
+        let storeURL = tempDir.appendingPathComponent("test_trust_store.json")
+        let trustStore = PinnedTrustStore(customStorageURL: storeURL)
         trustStore.enroll(
             identity: senderIdentity.publicIdentity,
             name: "Loopback Sender",

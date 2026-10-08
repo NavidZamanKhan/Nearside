@@ -42,29 +42,7 @@ public final class ShareViewController: UIViewController {
                 )
             }
         } else {
-            // Default paired devices fallback
-            self.pairedDevices = [
-                NearsideDevice(
-                    id: "dev_macbook_pro",
-                    name: "MacBook Pro",
-                    platform: .macOS,
-                    fingerprint: "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
-                    ipAddress: "192.168.0.100",
-                    port: 41433,
-                    reachability: .online,
-                    lastSeen: Date()
-                ),
-                NearsideDevice(
-                    id: "dev_iqoo_neo9",
-                    name: "iQOO Neo9",
-                    platform: .android,
-                    fingerprint: "ns1_8b31f0e2a45c7198bb4d1938fe76d029",
-                    ipAddress: "192.168.0.101",
-                    port: 41433,
-                    reachability: .online,
-                    lastSeen: Date()
-                )
-            ]
+            self.pairedDevices = []
         }
     }
 

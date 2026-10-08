@@ -72,86 +72,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadEnrolledAndSeedData() {
         val enrolled = trustStore.allEnrolledPeers()
-        val pairedList = if (enrolled.isNotEmpty()) {
-            enrolled.map { record ->
-                val platform = when (record.platformRaw.lowercase()) {
-                    "macos" -> DevicePlatform.MACOS
-                    "android" -> DevicePlatform.ANDROID
-                    "ios" -> DevicePlatform.IOS
-                    "windows" -> DevicePlatform.WINDOWS
-                    "linux" -> DevicePlatform.LINUX
-                    else -> DevicePlatform.ANDROID
-                }
-                NearsideDevice(
-                    id = record.identity,
-                    name = record.name,
-                    platform = platform,
-                    fingerprint = record.identity,
-                    reachability = DeviceReachability.ONLINE
-                )
+        val pairedList = enrolled.map { record ->
+            val platform = when (record.platformRaw.lowercase()) {
+                "macos" -> DevicePlatform.MACOS
+                "android" -> DevicePlatform.ANDROID
+                "ios" -> DevicePlatform.IOS
+                "windows" -> DevicePlatform.WINDOWS
+                "linux" -> DevicePlatform.LINUX
+                else -> DevicePlatform.ANDROID
             }
-        } else {
-            listOf(
-                NearsideDevice(
-                    id = "dev_macbook_pro",
-                    name = "MacBook Pro",
-                    platform = DevicePlatform.MACOS,
-                    fingerprint = "ns1_39a8bc43d87e51240a1b9f4277cd01ab",
-                    ipAddress = "192.168.0.104",
-                    port = 41433,
-                    reachability = DeviceReachability.ONLINE
-                ),
-                NearsideDevice(
-                    id = "dev_pixel_9",
-                    name = "Pixel 9 Pro",
-                    platform = DevicePlatform.ANDROID,
-                    fingerprint = "ns1_47c2fe8910ab3d5e6721984251cd0112",
-                    ipAddress = "192.168.0.108",
-                    port = 41433,
-                    reachability = DeviceReachability.ONLINE
-                ),
-                NearsideDevice(
-                    id = "dev_iphone_16",
-                    name = "iPhone 16 Pro",
-                    platform = DevicePlatform.IOS,
-                    fingerprint = "ns1_83f1cd5678ab432190123456789abcde",
-                    ipAddress = "192.168.0.112",
-                    port = 41433,
-                    reachability = DeviceReachability.ONLINE
-                )
+            NearsideDevice(
+                id = record.identity,
+                name = record.name,
+                platform = platform,
+                fingerprint = record.identity,
+                reachability = DeviceReachability.ONLINE
             )
         }
-
-        val initialTransfers = listOf(
-            TransferRecord(
-                deviceName = "MacBook Pro",
-                devicePlatform = DevicePlatform.MACOS,
-                direction = TransferDirection.INCOMING,
-                filename = "ClientPresentation.pdf",
-                totalSizeBytes = 18_400_000,
-                progress = 1.0f,
-                status = TransferStatus.COMPLETED,
-                timestamp = System.currentTimeMillis() - 600000
-            ),
-            TransferRecord(
-                deviceName = "iPhone 16 Pro",
-                devicePlatform = DevicePlatform.IOS,
-                direction = TransferDirection.OUTGOING,
-                filename = "https://github.com/nearside/app",
-                fileCount = 1,
-                totalSizeBytes = 32,
-                progress = 1.0f,
-                status = TransferStatus.COMPLETED,
-                payloadType = PayloadType.URL,
-                payloadText = "https://github.com/nearside/app",
-                timestamp = System.currentTimeMillis() - 1200000
-            )
-        )
 
         _uiState.update {
             it.copy(
                 pairedDevices = pairedList,
-                recentTransfers = initialTransfers
+                recentTransfers = emptyList()
             )
         }
     }

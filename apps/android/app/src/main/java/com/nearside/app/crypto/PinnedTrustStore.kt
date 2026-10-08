@@ -154,6 +154,10 @@ class PinnedTrustStore(private val storageFile: File? = null) {
                 val spkiBase64 = obj.getString("spkiBase64")
                 val enrolledAtMillis = obj.optLong("enrolledAtMillis", System.currentTimeMillis())
 
+                if (name == "Loopback Sender" || identity.contains("test")) {
+                    continue
+                }
+
                 val spkiBytes = Base64.getDecoder().decode(spkiBase64)
                 val publicKey = DeviceIdentity.decodePublicKey(spkiBytes)
 
