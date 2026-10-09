@@ -62,6 +62,11 @@ class NsdDiscoveryService(context: Context) {
             setAttribute("os", "android")
             setAttribute("pair", "1")
             setAttribute("recv", if (isReceiving) "1" else "0")
+            val localIp = getLocalWifiIp()
+            if (localIp.isNotEmpty() && localIp != "127.0.0.1") {
+                setAttribute("ip", localIp)
+            }
+            setAttribute("port", port.toString())
         }
 
         registrationListener = object : NsdManager.RegistrationListener {
@@ -186,8 +191,8 @@ class NsdDiscoveryService(context: Context) {
                     else -> DevicePlatform.ANDROID
                 }
 
-                val hostAddress = service.host?.hostAddress
-                val port = service.port
+                val hostAddress = attributes["ip"]?.let { String(it, Charsets.UTF_8) } ?: service.host?.hostAddress
+                val resolvedPort = attributes["port"]?.let { String(it, Charsets.UTF_8)?.toIntOrNull() } ?: service.port
                 val reachability = if (recvAttr == "1") DeviceReachability.ONLINE else DeviceReachability.BUSY
 
                 val device = NearsideDevice(
@@ -196,7 +201,7 @@ class NsdDiscoveryService(context: Context) {
                     platform = platform,
                     fingerprint = idAttr,
                     ipAddress = hostAddress,
-                    port = port,
+                    port = resolvedPort,
                     reachability = reachability,
                     lastSeenTimestamp = System.currentTimeMillis()
                 )
@@ -231,4 +236,21 @@ class NsdDiscoveryService(context: Context) {
         stopAdvertising()
         stopDiscovery()
     }
+}
+
+fun getLocalWifiIp(): String {
+    try {
+        val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+        while (interfaces.hasMoreElements()) {
+            val networkInterface = interfaces.nextElement()
+            val addresses = networkInterface.inetAddresses
+            while (addresses.hasMoreElements()) {
+                val address = addresses.nextElement()
+                if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
+                    return address.hostAddress ?: ""
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    return "127.0.0.1"
 }

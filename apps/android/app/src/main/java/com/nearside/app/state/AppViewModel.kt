@@ -87,6 +87,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 name = record.name,
                 platform = platform,
                 fingerprint = record.identity,
+                ipAddress = record.lastKnownIp,
+                port = record.lastKnownPort,
                 reachability = DeviceReachability.ONLINE
             )
         }

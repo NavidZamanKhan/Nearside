@@ -77,8 +77,8 @@ class ShareTargetActivity : ComponentActivity() {
                 name = record.name,
                 platform = platform,
                 fingerprint = record.identity,
-                ipAddress = "",
-                port = 41433
+                ipAddress = record.lastKnownIp ?: "",
+                port = record.lastKnownPort ?: 41433
             )
         }
 

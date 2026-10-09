@@ -92,6 +92,7 @@ public final class DiscoveryService: @unchecked Sendable {
             txt["os"] = "macos"
             txt["pair"] = "1"
             txt["recv"] = isReceivingActive ? "1" : "0"
+            txt["port"] = "\(boundPort)"
 
             newListener.service = NWListener.Service(
                 name: serviceName,
@@ -147,6 +148,7 @@ public final class DiscoveryService: @unchecked Sendable {
         txt["os"] = "macos"
         txt["pair"] = "1"
         txt["recv"] = isReceivingActive ? "1" : "0"
+        txt["port"] = "\(boundPort)"
 
         listener.service = NWListener.Service(
             name: serviceName,
@@ -224,10 +226,16 @@ public final class DiscoveryService: @unchecked Sendable {
             }
 
             var endpointHost: String? = nil
-            let endpointPort: UInt16? = nil
+            var endpointPort: UInt16? = nil
 
-            if case let .service(name, _, _, _) = result.endpoint {
+            if let ipStr = txtRecord["ip"], !ipStr.isEmpty {
+                endpointHost = ipStr
+            } else if case let .service(name, _, _, _) = result.endpoint {
                 endpointHost = name
+            }
+
+            if let portStr = txtRecord["port"], let p = UInt16(portStr) {
+                endpointPort = p
             }
 
             let reachability: DeviceReachability = recvActive ? .online : .busy
@@ -244,6 +252,9 @@ public final class DiscoveryService: @unchecked Sendable {
             )
 
             updatedDevices[peerId] = device
+            if let ip = endpointHost, !ip.isEmpty, !ip.hasPrefix("Nearside-") {
+                PinnedTrustStore().updatePeerEndpoint(identity: peerId, ip: ip, port: endpointPort ?? 41433)
+            }
         }
 
         self.discoveredMap = updatedDevices

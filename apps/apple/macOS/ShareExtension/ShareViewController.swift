@@ -41,8 +41,8 @@ public final class ShareExtensionViewModel: ObservableObject {
                     name: p.name,
                     platform: platform,
                     fingerprint: p.identity,
-                    ipAddress: "192.168.0.100",
-                    port: 41433,
+                    ipAddress: p.lastKnownIp ?? "192.168.0.100",
+                    port: p.lastKnownPort ?? 41433,
                     reachability: .online,
                     lastSeen: Date()
                 )
@@ -58,7 +58,15 @@ public final class ShareExtensionViewModel: ObservableObject {
                 var merged = self.devices
                 for d in discovered {
                     if let idx = merged.firstIndex(where: { $0.id == d.id }) {
-                        merged[idx] = d
+                        merged[idx].name = d.name
+                        if let ip = d.ipAddress, !ip.isEmpty {
+                            merged[idx].ipAddress = ip
+                        }
+                        if let port = d.port {
+                            merged[idx].port = port
+                        }
+                        merged[idx].reachability = d.reachability
+                        merged[idx].lastSeen = Date()
                     } else {
                         merged.append(d)
                     }
@@ -167,18 +175,30 @@ public final class ShareExtensionViewModel: ObservableObject {
 
     private func stageURL(_ source: URL, stagingDir: URL) -> URL {
         let isSecurityScoped = source.startAccessingSecurityScopedResource()
-        let name = source.lastPathComponent.isEmpty ? "file_\(UUID().uuidString.prefix(6))" : source.lastPathComponent
-        let target = stagingDir.appendingPathComponent(name)
-        try? FileManager.default.removeItem(at: target)
+        defer {
+            if isSecurityScoped {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let originalName = source.lastPathComponent.isEmpty ? "file_\(UUID().uuidString.prefix(6))" : source.lastPathComponent
+        var target = stagingDir.appendingPathComponent(originalName)
+
+        var counter = 1
+        let baseName = (originalName as NSString).deletingPathExtension
+        let ext = (originalName as NSString).pathExtension
+        while FileManager.default.fileExists(atPath: target.path) {
+            let uniqueName = ext.isEmpty ? "\(baseName)_\(counter)" : "\(baseName)_\(counter).\(ext)"
+            target = stagingDir.appendingPathComponent(uniqueName)
+            counter += 1
+        }
 
         do {
             try FileManager.default.copyItem(at: source, to: target)
-            if isSecurityScoped { source.stopAccessingSecurityScopedResource() }
             return target
         } catch {
             if let data = try? Data(contentsOf: source) {
                 if (try? data.write(to: target)) != nil {
-                    if isSecurityScoped { source.stopAccessingSecurityScopedResource() }
                     return target
                 }
             }
@@ -217,8 +237,18 @@ public final class ShareExtensionViewModel: ObservableObject {
                     continuation.resume(returning: url)
                 } else if let nsUrl = item as? NSURL {
                     continuation.resume(returning: nsUrl as URL)
+                } else if let s = item as? String {
+                    let u = URL(string: s) ?? URL(fileURLWithPath: s)
+                    continuation.resume(returning: u)
+                } else if let ns = item as? NSString {
+                    let u = URL(string: ns as String) ?? URL(fileURLWithPath: ns as String)
+                    continuation.resume(returning: u)
                 } else if let data = item as? Data {
-                    if let s = String(data: data, encoding: .utf8), let u = URL(string: s) {
+                    var isStale = false
+                    if let bookmarkURL = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale) {
+                        continuation.resume(returning: bookmarkURL)
+                    } else if let s = String(data: data, encoding: .utf8) {
+                        let u = URL(string: s) ?? URL(fileURLWithPath: s)
                         continuation.resume(returning: u)
                     } else if let u = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSURL.self, from: data) {
                         continuation.resume(returning: u as URL)
@@ -291,7 +321,7 @@ public final class ShareExtensionViewModel: ObservableObject {
                         self.progress = 1.0
                         self.isCompleted = true
                         NearsideLogger.shared.info("share", "startTransfer", "Transfer complete", state: "completed")
-                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
                         self.cleanup()
                         onComplete()
                     case .failure(let err):

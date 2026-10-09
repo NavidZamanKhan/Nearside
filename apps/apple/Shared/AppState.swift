@@ -70,6 +70,8 @@ public final class AppState: ObservableObject {
                     name: record.name,
                     platform: platform,
                     fingerprint: record.identity,
+                    ipAddress: record.lastKnownIp,
+                    port: record.lastKnownPort,
                     reachability: .online,
                     lastSeen: record.enrolledAt
                 )
@@ -234,6 +236,7 @@ public final class AppState: ObservableObject {
                         reachability: .online,
                         lastSeen: Date()
                     )
+                    self.trustStore.updatePeerEndpoint(identity: resp.serverId, ip: targetHost, port: UInt16(port ?? 41433))
                     self.pairedDevices.removeAll { $0.id == resp.serverId }
                     self.pairedDevices.append(newDevice)
                     completion?(.success(newDevice))

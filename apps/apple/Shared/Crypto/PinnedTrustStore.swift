@@ -14,6 +14,26 @@ public struct TrustedPeerRecord: Codable {
     public let platformRaw: String
     public let spkiBase64: String
     public let enrolledAt: Date
+    public var lastKnownIp: String?
+    public var lastKnownPort: UInt16?
+
+    public init(
+        identity: String,
+        name: String,
+        platformRaw: String,
+        spkiBase64: String,
+        enrolledAt: Date,
+        lastKnownIp: String? = nil,
+        lastKnownPort: UInt16? = nil
+    ) {
+        self.identity = identity
+        self.name = name
+        self.platformRaw = platformRaw
+        self.spkiBase64 = spkiBase64
+        self.enrolledAt = enrolledAt
+        self.lastKnownIp = lastKnownIp
+        self.lastKnownPort = lastKnownPort
+    }
 }
 
 public final class PinnedTrustStore {
@@ -34,14 +54,23 @@ public final class PinnedTrustStore {
         loadFromDisk()
     }
 
-    public func enroll(identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey) {
+    public func enroll(
+        identity: String,
+        name: String,
+        platform: String,
+        publicKey: P256.Signing.PublicKey,
+        lastKnownIp: String? = nil,
+        lastKnownPort: UInt16? = nil
+    ) {
         enrolledKeys[identity] = publicKey
         peerMetadata[identity] = TrustedPeerRecord(
             identity: identity,
             name: name,
             platformRaw: platform,
             spkiBase64: publicKey.derRepresentation.base64EncodedString(),
-            enrolledAt: Date()
+            enrolledAt: Date(),
+            lastKnownIp: lastKnownIp,
+            lastKnownPort: lastKnownPort
         )
         saveToDisk()
         NearsideLogger.shared.info("trust", "enroll", "Enrolled trusted peer", metadata: [
@@ -49,6 +78,23 @@ public final class PinnedTrustStore {
             "name": name,
             "platform": platform
         ])
+    }
+
+    public func updatePeerEndpoint(identity: String, ip: String?, port: UInt16?) {
+        guard var record = peerMetadata[identity] else { return }
+        var changed = false
+        if let ip = ip, !ip.isEmpty, record.lastKnownIp != ip {
+            record.lastKnownIp = ip
+            changed = true
+        }
+        if let port = port, port > 0, record.lastKnownPort != port {
+            record.lastKnownPort = port
+            changed = true
+        }
+        if changed {
+            peerMetadata[identity] = record
+            saveToDisk()
+        }
     }
 
     public func block(identity: String) {

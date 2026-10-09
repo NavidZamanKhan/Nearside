@@ -37,6 +37,8 @@ public final class ShareViewController: UIViewController {
                     name: record.name,
                     platform: platform,
                     fingerprint: record.identity,
+                    ipAddress: record.lastKnownIp,
+                    port: record.lastKnownPort,
                     reachability: .online,
                     lastSeen: record.enrolledAt
                 )

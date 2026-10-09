@@ -14,7 +14,9 @@ data class TrustedPeerRecord(
     val name: String,
     val platformRaw: String,
     val spkiBase64: String,
-    val enrolledAtMillis: Long
+    val enrolledAtMillis: Long,
+    var lastKnownIp: String? = null,
+    var lastKnownPort: Int? = null
 )
 
 sealed class TrustResult {
@@ -38,7 +40,14 @@ class PinnedTrustStore(private val storageFile: File? = null) {
         loadFromDisk()
     }
 
-    fun enroll(identity: String, name: String, platform: String, publicKey: PublicKey) {
+    fun enroll(
+        identity: String,
+        name: String,
+        platform: String,
+        publicKey: PublicKey,
+        lastKnownIp: String? = null,
+        lastKnownPort: Int? = null
+    ) {
         val spkiBase64 = Base64.getEncoder().encodeToString(publicKey.encoded)
         enrolledKeys[identity] = publicKey
         peerMetadata[identity] = TrustedPeerRecord(
@@ -46,7 +55,9 @@ class PinnedTrustStore(private val storageFile: File? = null) {
             name = name,
             platformRaw = platform,
             spkiBase64 = spkiBase64,
-            enrolledAtMillis = System.currentTimeMillis()
+            enrolledAtMillis = System.currentTimeMillis(),
+            lastKnownIp = lastKnownIp,
+            lastKnownPort = lastKnownPort
         )
         saveToDisk()
         NearsideLogger.info("trust", "enroll", "Enrolled trusted peer", metadata = mapOf(
@@ -54,6 +65,22 @@ class PinnedTrustStore(private val storageFile: File? = null) {
             "name" to name,
             "platform" to platform
         ))
+    }
+
+    fun updatePeerEndpoint(identity: String, ip: String?, port: Int?) {
+        val record = peerMetadata[identity] ?: return
+        var changed = false
+        if (!ip.isNullOrEmpty() && record.lastKnownIp != ip) {
+            record.lastKnownIp = ip
+            changed = true
+        }
+        if (port != null && port > 0 && record.lastKnownPort != port) {
+            record.lastKnownPort = port
+            changed = true
+        }
+        if (changed) {
+            saveToDisk()
+        }
     }
 
     fun block(identity: String) {
@@ -118,6 +145,12 @@ class PinnedTrustStore(private val storageFile: File? = null) {
                     put("platformRaw", record.platformRaw)
                     put("spkiBase64", record.spkiBase64)
                     put("enrolledAtMillis", record.enrolledAtMillis)
+                    if (record.lastKnownIp != null) {
+                        put("lastKnownIp", record.lastKnownIp)
+                    }
+                    if (record.lastKnownPort != null) {
+                        put("lastKnownPort", record.lastKnownPort)
+                    }
                 }
                 array.put(obj)
             }
@@ -161,13 +194,18 @@ class PinnedTrustStore(private val storageFile: File? = null) {
                 val spkiBytes = Base64.getDecoder().decode(spkiBase64)
                 val publicKey = DeviceIdentity.decodePublicKey(spkiBytes)
 
+                val lastKnownIp = if (obj.has("lastKnownIp")) obj.optString("lastKnownIp").takeIf { it.isNotEmpty() } else null
+                val lastKnownPort = if (obj.has("lastKnownPort")) obj.optInt("lastKnownPort").takeIf { it > 0 } else null
+
                 enrolledKeys[identity] = publicKey
                 peerMetadata[identity] = TrustedPeerRecord(
                     identity = identity,
                     name = name,
                     platformRaw = platformRaw,
                     spkiBase64 = spkiBase64,
-                    enrolledAtMillis = enrolledAtMillis
+                    enrolledAtMillis = enrolledAtMillis,
+                    lastKnownIp = lastKnownIp,
+                    lastKnownPort = lastKnownPort
                 )
             }
 
