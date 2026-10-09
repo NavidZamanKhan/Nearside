@@ -248,6 +248,16 @@ public struct MenuBarShelfView: View {
         )
     }
 
+    private var allAvailablePeers: [NearsideDevice] {
+        var peers = appState.discoveredDevices
+        for p in appState.pairedDevices {
+            if !peers.contains(where: { $0.id == p.id }) {
+                peers.append(p)
+            }
+        }
+        return peers
+    }
+
     // MARK: - Nearby Devices Section
     private var nearbyDevicesSection: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -256,13 +266,13 @@ public struct MenuBarShelfView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
                 Spacer()
-                Text("\(appState.discoveredDevices.count) nearby")
+                Text("\(allAvailablePeers.count) available")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
             .padding(.horizontal, 2)
 
-            if appState.discoveredDevices.isEmpty {
+            if allAvailablePeers.isEmpty {
                 VStack(spacing: 4) {
                     Text("No nearby devices advertising")
                         .font(.caption)
@@ -277,7 +287,7 @@ public struct MenuBarShelfView: View {
                 .padding(.vertical, 10)
             } else {
                 VStack(spacing: 4) {
-                    ForEach(appState.discoveredDevices) { device in
+                    ForEach(allAvailablePeers) { device in
                         DeviceRowView(
                             device: device,
                             onSend: { promptSendFile(to: device) },
@@ -383,14 +393,14 @@ public struct MenuBarShelfView: View {
 
             Divider()
 
-            if appState.discoveredDevices.isEmpty {
+            if allAvailablePeers.isEmpty {
                 Text("No paired devices found nearby")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.vertical, 20)
             } else {
                 VStack(spacing: 6) {
-                    ForEach(appState.discoveredDevices) { device in
+                    ForEach(allAvailablePeers) { device in
                         Button(action: {
                             let urls = droppedURLs
                             showRecipientPicker = false
@@ -447,7 +457,8 @@ public struct MenuBarShelfView: View {
 
         group.notify(queue: .main) {
             guard !urls.isEmpty else { return }
-            if self.appState.discoveredDevices.count == 1, let singleDevice = self.appState.discoveredDevices.first {
+            let peers = self.allAvailablePeers
+            if peers.count == 1, let singleDevice = peers.first {
                 self.appState.sendFiles(urls: urls, to: singleDevice)
             } else {
                 self.droppedURLs = urls
