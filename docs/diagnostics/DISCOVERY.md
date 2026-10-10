@@ -82,6 +82,11 @@ shows a retry message. No name-based trust cleanup takes place.
 Regression verification: `bash scripts/verify_peer_presence.sh` covers initial offline
 state, exact identity matching, multiple aliases, same-name identities, disappearance,
 reappearance, receiving paused, and durable removal of only the selected peer.
+`bash scripts/verify_app_state_presence.sh` exercises the actual AppState integration,
+including blocked recipient exclusion and failed unpair rollback. These tests inject
+temporary trust files and ephemeral test keys with discovery disabled. Its optional
+`--render-shelf` argument produces an offscreen native preview at the shelf's actual
+350 by 420 point size under `build/app-state-presence-tests/ShelfPreview.png`.
 
 Manual macOS checks:
 
@@ -97,3 +102,9 @@ Manual macOS checks:
    action displays a QR session restricted to the selected cryptographic identity.
 5. Keep an unpaired nearby phone present. It shows Pair under Available Nearby and is
    excluded from every transfer recipient picker until enrollment succeeds.
+6. Turn Receiving off from the shelf, then enable it in Preferences. Confirm discovery
+   and the receiver restart, then pair using the newly displayed QR. Repeat with the
+   iOS Home and Settings receiving switches.
+7. Keep a file transfer active while another device attempts an invalid QR exchange.
+   Its progress and busy indicator must remain intact. Regenerate a QR and dismiss an
+   older pairing window; the newly displayed session must remain available.

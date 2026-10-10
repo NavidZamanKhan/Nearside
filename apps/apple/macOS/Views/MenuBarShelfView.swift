@@ -10,6 +10,8 @@ public struct MenuBarShelfView: View {
     @State private var isDropzoneTargeted: Bool = false
     @State private var droppedURLs: [URL] = []
     @State private var showRecipientPicker: Bool = false
+    @State private var pairingRequest: ShelfPairingRequest?
+    @State private var unpairCandidate: NearsideDevice?
 
     public init(
         appState: AppState,
@@ -28,6 +30,18 @@ public struct MenuBarShelfView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
                 .padding(.bottom, 10)
+
+            Button {
+                pairingRequest = ShelfPairingRequest(target: nil)
+            } label: {
+                Label("Pair Device / Show QR", systemImage: "qrcode")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
 
             Divider()
 
@@ -62,7 +76,7 @@ public struct MenuBarShelfView: View {
                     // Universal Quick Dropzone
                     universalDropzoneCard
 
-                    // Available Peers
+                    trustedDevicesSection
                     nearbyDevicesSection
 
                     // Recent Transfers History
@@ -71,7 +85,7 @@ public struct MenuBarShelfView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
             }
-            .frame(maxHeight: 380)
+            .frame(maxHeight: .infinity)
 
             Divider()
 
@@ -80,9 +94,24 @@ public struct MenuBarShelfView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
         }
-        .frame(width: 350)
+        .frame(width: 350, height: 420)
         .sheet(isPresented: $showRecipientPicker) {
             recipientPickerSheet
+        }
+        .sheet(item: $pairingRequest) { request in
+            MacPairingView(appState: appState, target: request.target)
+        }
+        .confirmationDialog("Unpair \(unpairCandidate?.name ?? "device")?", isPresented: Binding(
+            get: { unpairCandidate != nil },
+            set: { if !$0 { unpairCandidate = nil } }
+        ), titleVisibility: .visible, presenting: unpairCandidate) { device in
+            Button("Unpair", role: .destructive) {
+                appState.unpairDevice(id: device.fingerprint)
+                unpairCandidate = nil
+            }
+            Button("Cancel", role: .cancel) { unpairCandidate = nil }
+        } message: { device in
+            Text("Remove trust for identity \(device.shortFingerprint)? Pair this device again before sending or receiving content.")
         }
     }
 
@@ -248,56 +277,69 @@ public struct MenuBarShelfView: View {
         )
     }
 
-    private var allAvailablePeers: [NearsideDevice] {
-        var peers = appState.discoveredDevices
-        for p in appState.pairedDevices {
-            if !peers.contains(where: { $0.id == p.id }) {
-                peers.append(p)
+    private var trustedDevicesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeading("TRUSTED DEVICES", count: appState.pairedDevices.count)
+            if appState.pairedDevices.isEmpty {
+                Text("No paired devices yet")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(appState.pairedDevices) { device in
+                        DeviceRowView(device: device, isTrusted: true,
+                            isBlocked: appState.trustStore.isBlocked(identity: device.fingerprint),
+                            canSend: appState.onlineTransferRecipients.contains { $0.fingerprint == device.fingerprint },
+                            onSend: { promptSendFile(to: device) },
+                            onSendClipboard: { sendClipboardIfAvailable(to: device) },
+                            onDropFiles: { urls in sendFilesIfAvailable(urls, to: device) },
+                            onPair: {}, onUnpair: { unpairCandidate = device })
+                    }
+                }
             }
         }
-        return peers
     }
 
-    // MARK: - Nearby Devices Section
     private var nearbyDevicesSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("AVAILABLE PEERS")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text("\(allAvailablePeers.count) available")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 2)
-
-            if allAvailablePeers.isEmpty {
+            sectionHeading("AVAILABLE NEARBY", count: appState.availableNearbyDevices.count)
+            if appState.availableNearbyDevices.isEmpty {
                 VStack(spacing: 4) {
-                    Text("No nearby devices advertising")
+                    Text("No unpaired devices nearby")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     if !appState.isReceivingActive {
-                        Text("Turn on Receiving above to discover peers on Wi-Fi")
+                        Text("Turn on Receiving to discover peers on Wi-Fi")
                             .font(.system(size: 9))
-                            .foregroundColor(.secondary.opacity(0.8))
+                            .foregroundColor(.secondary)
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
+                .padding(.vertical, 8)
             } else {
                 VStack(spacing: 4) {
-                    ForEach(allAvailablePeers) { device in
-                        DeviceRowView(
-                            device: device,
-                            onSend: { promptSendFile(to: device) },
-                            onSendClipboard: { appState.sendClipboard(to: device) },
-                            onDropFiles: { urls in appState.sendFiles(urls: urls, to: device) }
-                        )
+                    ForEach(appState.availableNearbyDevices) { device in
+                        DeviceRowView(device: device, isTrusted: false, isBlocked: false, canSend: false,
+                            onSend: {}, onSendClipboard: {}, onDropFiles: { _ in },
+                            onPair: { pairingRequest = ShelfPairingRequest(target: device) }, onUnpair: {})
                     }
                 }
             }
         }
+    }
+
+    private func sectionHeading(_ title: String, count: Int) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 10, weight: .bold))
+            Spacer()
+            Text("\(count)")
+                .font(.caption2)
+        }
+        .foregroundColor(.secondary)
+        .padding(.horizontal, 2)
     }
 
     // MARK: - Recent Transfers Section
@@ -393,19 +435,19 @@ public struct MenuBarShelfView: View {
 
             Divider()
 
-            if allAvailablePeers.isEmpty {
-                Text("No paired devices found nearby")
+            if appState.onlineTransferRecipients.isEmpty {
+                Text("No trusted devices are online")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.vertical, 20)
             } else {
                 VStack(spacing: 6) {
-                    ForEach(allAvailablePeers) { device in
+                    ForEach(appState.onlineTransferRecipients) { device in
                         Button(action: {
                             let urls = droppedURLs
                             showRecipientPicker = false
                             droppedURLs.removeAll()
-                            appState.sendFiles(urls: urls, to: device)
+                            sendFilesIfAvailable(urls, to: device)
                         }) {
                             HStack(spacing: 10) {
                                 Image(systemName: device.platform.systemSymbolName)
@@ -457,14 +499,36 @@ public struct MenuBarShelfView: View {
 
         group.notify(queue: .main) {
             guard !urls.isEmpty else { return }
-            let peers = self.allAvailablePeers
+            let peers = self.appState.onlineTransferRecipients
             if peers.count == 1, let singleDevice = peers.first {
-                self.appState.sendFiles(urls: urls, to: singleDevice)
+                self.sendFilesIfAvailable(urls, to: singleDevice)
             } else {
                 self.droppedURLs = urls
                 self.showRecipientPicker = true
             }
         }
+    }
+
+    private func availableRecipient(_ device: NearsideDevice) -> NearsideDevice? {
+        guard let live = appState.onlineTransferRecipients.first(where: { $0.fingerprint == device.fingerprint }) else {
+            let failure = NearsideError(code: .discoveryResolveFailed, operation: "shelfSend",
+                message: "Selected trusted device is not available. Wait for it to appear online.",
+                correlationId: UUID().uuidString)
+            NearsideLogger.shared.error(failure, state: "unavailable")
+            appState.clipboardToastMessage = "Device is offline [\(failure.code.rawValue)]"
+            return nil
+        }
+        return live
+    }
+
+    private func sendFilesIfAvailable(_ urls: [URL], to device: NearsideDevice) {
+        guard let live = availableRecipient(device) else { return }
+        appState.sendFiles(urls: urls, to: live)
+    }
+
+    private func sendClipboardIfAvailable(to device: NearsideDevice) {
+        guard let live = availableRecipient(device) else { return }
+        appState.sendClipboard(to: live)
     }
 
     private func promptSendFile(to device: NearsideDevice) {
@@ -476,19 +540,43 @@ public struct MenuBarShelfView: View {
         panel.title = "Send to \(device.name)"
 
         if panel.runModal() == .OK {
-            appState.sendFiles(urls: panel.urls, to: device)
+            sendFilesIfAvailable(panel.urls, to: device)
         }
     }
+}
+
+private struct ShelfPairingRequest: Identifiable {
+    let id = UUID()
+    let target: NearsideDevice?
 }
 
 // MARK: - Native AppKit-Style Device Row
 private struct DeviceRowView: View {
     let device: NearsideDevice
+    let isTrusted: Bool
+    let isBlocked: Bool
+    let canSend: Bool
     let onSend: () -> Void
     let onSendClipboard: () -> Void
     let onDropFiles: ([URL]) -> Void
+    let onPair: () -> Void
+    let onUnpair: () -> Void
     @State private var isHovered: Bool = false
     @State private var isDropTarget: Bool = false
+
+    private var presenceColor: Color {
+        isTrusted ? (device.reachability == .online && !isBlocked ? .green : .gray) : .accentColor
+    }
+
+    private var presenceLabel: String {
+        guard isTrusted else { return "Nearby / Not paired" }
+        if isBlocked { return "Trusted / Blocked" }
+        switch device.reachability {
+        case .online: return "Trusted / Online"
+        case .busy: return "Trusted / Receiving paused"
+        case .unreachable: return "Trusted / Offline"
+        }
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -505,6 +593,15 @@ private struct DeviceRowView: View {
                 Text(device.name)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.primary)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(presenceColor)
+                        .frame(width: 5, height: 5)
+                    Text(presenceLabel)
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
                 HStack(spacing: 4) {
                     Text(device.platform.displayName)
                     Text("•")
@@ -516,17 +613,34 @@ private struct DeviceRowView: View {
 
             Spacer()
 
-            Button(action: onSendClipboard) {
-                Image(systemName: "doc.on.clipboard")
-                    .font(.system(size: 11))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Beam current clipboard to \(device.name)")
-
-            Button("Send...", action: onSend)
+            if isTrusted {
+                Button(action: onSendClipboard) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 11))
+                }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(!canSend)
+                .help(canSend ? "Send clipboard to \(device.name)" : "Device is unavailable")
+
+                Button("Send...", action: onSend)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!canSend)
+
+                Button(action: onUnpair) {
+                    Image(systemName: "person.crop.circle.badge.xmark")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .help("Unpair \(device.name) (\(device.shortFingerprint))")
+                .accessibilityLabel("Unpair \(device.name)")
+            } else {
+                Button("Pair", action: onPair)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -538,6 +652,7 @@ private struct DeviceRowView: View {
             isHovered = inside
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
+            guard canSend else { return false }
             let group = DispatchGroup()
             var collectedURLs: [URL] = []
             let lock = NSLock()
