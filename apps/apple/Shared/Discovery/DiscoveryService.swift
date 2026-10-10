@@ -181,7 +181,7 @@ public final class DiscoveryService: @unchecked Sendable {
         discoveredEndpoints.removeAll()
         DispatchQueue.main.async { [weak self] in self?.onDiscoveredDevicesChanged?([]) }
 
-        let descriptor = NWBrowser.Descriptor.bonjour(type: "_nearside._tcp", domain: nil)
+        let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: "_nearside._tcp", domain: nil)
         let parameters = NWParameters.tcp
         let newBrowser = NWBrowser(for: descriptor, using: parameters)
         self.browser = newBrowser
