@@ -18,37 +18,74 @@ public struct DeviceIdentity {
         self.publicIdentity = "ns1_\(hex)"
     }
 
-    public static let defaultEnrolledIdentity = "ns1_13798add1ad8ac8b05b83a7a81dfca920287bab8378bae9e161d30eeca2a2329"
-
+    /// Compatibility for callers initialized synchronously. Identity failures
+    /// are fatal rather than silently changing an already enrolled device key.
     public static func loadOrCreateDefault() -> DeviceIdentity {
-        let tag = "com.nearside.identity.p256".data(using: .utf8)!
+        do { return try loadOrCreatePersistent() }
+        catch {
+            let failure = (error as? NearsideError) ?? NearsideError(code: .trustStorageFailed,
+                operation: "loadDeviceIdentity", message: "Persistent device identity is unavailable.")
+            NearsideLogger.shared.error(failure, state: "failed")
+            fatalError("[NS-TRUST-004] Persistent device identity is unavailable; unlock Keychain and restart Nearside.")
+        }
+    }
+
+    public static func loadOrCreatePersistent() throws -> DeviceIdentity {
+        let tag = Data("com.nearside.identity.p256".utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true
         ]
+        return try loadOrCreatePersistent(readKey: {
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            return (status, item as? Data)
+        }, addKey: { data in
+            let addQuery: [String: Any] = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: tag,
+                kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            ]
+            return SecItemAdd(addQuery as CFDictionary, nil)
+        })
+    }
 
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecSuccess, let keyData = item as? Data,
-           let privKey = try? P256.Signing.PrivateKey(rawRepresentation: keyData) {
-            return DeviceIdentity(privateKey: privKey)
+    /// Injectable persistence boundary for regression tests; private key bytes
+    /// remain in Keychain in production and are never exported to a container.
+    static func loadOrCreatePersistent(readKey: () -> (OSStatus, Data?),
+                                       addKey: (Data) -> OSStatus) throws -> DeviceIdentity {
+        func decode(_ data: Data?) throws -> DeviceIdentity {
+            guard let data, let key = try? P256.Signing.PrivateKey(rawRepresentation: data) else {
+                throw NearsideError(code: .trustStorageFailed, operation: "loadDeviceIdentity",
+                    message: "The stored device identity is invalid. Existing Keychain data was preserved.")
+            }
+            return DeviceIdentity(privateKey: key)
         }
-
-        // Generate new persistent identity
-        let newKey = P256.Signing.PrivateKey()
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecValueData as String: newKey.rawRepresentation,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        SecItemDelete(query as CFDictionary)
-        SecItemAdd(addQuery as CFDictionary, nil)
-
-        return DeviceIdentity(privateKey: newKey)
+        func storageFailure(_ status: OSStatus) -> NearsideError {
+            NearsideError(code: .trustStorageFailed, operation: "loadDeviceIdentity",
+                message: "Cannot access the persistent device identity. Unlock Keychain and restart Nearside.",
+                underlyingError: NSError(domain: NSOSStatusErrorDomain, code: Int(status)))
+        }
+        let (status, existing) = readKey()
+        if status == errSecSuccess { return try decode(existing) }
+        // Denied access, locked Keychain and corrupt data must never delete or
+        // replace an enrolled key. Only a confirmed missing item allows creation.
+        guard status == errSecItemNotFound else { throw storageFailure(status) }
+        let candidate = P256.Signing.PrivateKey()
+        let addStatus = addKey(candidate.rawRepresentation)
+        if addStatus == errSecSuccess { return DeviceIdentity(privateKey: candidate) }
+        if addStatus == errSecDuplicateItem {
+            // A concurrent host initialization may have created the identity.
+            let (rereadStatus, persisted) = readKey()
+            guard rereadStatus == errSecSuccess else { throw storageFailure(rereadStatus) }
+            return try decode(persisted)
+        }
+        throw storageFailure(addStatus)
     }
 
     public static func computeIdentity(fromSpki spki: Data) -> String {

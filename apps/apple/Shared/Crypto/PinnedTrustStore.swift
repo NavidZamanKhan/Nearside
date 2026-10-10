@@ -115,6 +115,14 @@ public final class PinnedTrustStore {
         return enrolledKeys[identity] != nil
     }
 
+    public func isBlocked(identity: String) -> Bool {
+        blockedIdentities.contains(identity)
+    }
+
+    public func canTransfer(identity: String) -> Bool {
+        isEnrolled(identity: identity) && !isBlocked(identity: identity)
+    }
+
     public func allEnrolledPeers() -> [TrustedPeerRecord] {
         return Array(peerMetadata.values)
     }

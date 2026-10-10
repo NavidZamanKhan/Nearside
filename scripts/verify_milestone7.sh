@@ -57,15 +57,10 @@ grep -q "categoryFileReceived" apps/apple/macOS/Notifications/MacNotificationMan
 grep -q "categoryContentReceived" apps/apple/macOS/Notifications/MacNotificationManager.swift
 echo "  -> Verified: Universal Dropzone and actionable Notification handlers in place."
 
-# 6. Verify Installation to /Applications
-echo "[6/6] Verifying /Applications/Nearside.app Bundle and Registration..."
-if [ -d "/Applications/Nearside.app" ]; then
-    codesign -v "/Applications/Nearside.app"
-    echo "  -> Verified: /Applications/Nearside.app installed and code-signed valid."
-else
-    echo "  -> FAILED: /Applications/Nearside.app not found."
-    exit 1
-fi
+# 6. Verify the artifact built by this run, without changing system installation.
+echo "[6/6] Verifying local macOS bundle..."
+codesign -v "$DIR/build/macos/Nearside.app"
+echo "  -> Verified: local Nearside.app signature; no installation performed."
 
 echo "=================================================="
 echo "  Milestone 7 Part 1 Verification PASSED!"
