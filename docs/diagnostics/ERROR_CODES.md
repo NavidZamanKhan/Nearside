@@ -30,6 +30,8 @@ Format: `NS-[SUBSYSTEM]-[NUMBER]`
 | `NS-PAIR-002` | `pairingVerificationFailed` | Pairing cryptographic HMAC commitment verification failed. | Incorrect short code entered, corrupted QR scan, mismatched secret. | Confirm the short code matches the peer's displayed code. Rescan QR code. |
 | `NS-PAIR-003` | `pairingRateLimitExceeded` | PAKE short code rate limit exceeded (lockout triggered). | 5 consecutive invalid short code attempts. | Wait for the lockout timeout or initiate a fresh pairing session from the host device. |
 | `NS-PAIR-004` | `pairingMalformedPayload` | QR code URI or pairing payload failed parsing. | Invalid `nearside://pair` URI scheme, missing version, truncated base64 secret. | Verify QR generator version matches scanner protocol version. |
+| `NS-PAIR-005` | `pairingCameraUnavailable` | QR scanning camera could not start or was interrupted. | Missing camera, camera in use, capture setup or runtime failure. | Retry scanning or paste the current pairing URI. |
+| `NS-PAIR-006` | `pairingCameraPermissionDenied` | QR scanning camera permission is denied or restricted. | User denied access or the OS restricts it. | Enable camera permission in app settings or paste the current pairing URI. |
 
 ---
 

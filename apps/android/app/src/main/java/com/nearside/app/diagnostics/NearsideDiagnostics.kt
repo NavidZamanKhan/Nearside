@@ -19,6 +19,8 @@ enum class NearsideErrorCode(val code: String, val subsystem: String) {
     PAIRING_VERIFICATION_FAILED("NS-PAIR-002", "pairing"),
     PAIRING_RATE_LIMIT_EXCEEDED("NS-PAIR-003", "pairing"),
     PAIRING_MALFORMED_PAYLOAD("NS-PAIR-004", "pairing"),
+    PAIRING_CAMERA_UNAVAILABLE("NS-PAIR-005", "pairing"),
+    PAIRING_CAMERA_PERMISSION_DENIED("NS-PAIR-006", "pairing"),
 
     // Trust
     TRUST_UNTRUSTED_PEER("NS-TRUST-001", "trust"),

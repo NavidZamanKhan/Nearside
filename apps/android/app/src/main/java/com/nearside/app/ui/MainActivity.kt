@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
@@ -88,6 +89,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -106,6 +108,8 @@ import com.nearside.app.model.TransferStatus
 import com.nearside.app.service.NearsideReceiverService
 import com.nearside.app.state.AppViewModel
 import com.nearside.app.state.NearsideUiState
+import com.nearside.app.state.PairingFlowState
+import com.nearside.app.state.PairingPhase
 import com.nearside.app.ui.theme.NearsideAmber
 import com.nearside.app.ui.theme.NearsideBlue
 import com.nearside.app.ui.theme.NearsideGreen
@@ -171,20 +175,7 @@ class MainActivity : ComponentActivity() {
                 val onUnpair = remember { { id: String -> viewModel.unpairDevice(id) } }
                 val onPairCode = remember { { code: String -> viewModel.pairWithCode(code) } }
                 val onPairQr = remember {
-                    { input: String ->
-                        val trimmed = input.trim()
-                        if (trimmed.startsWith("nearside://pair")) {
-                            viewModel.pairWithQrUri(trimmed)
-                        } else if (trimmed.contains(".")) {
-                            val parts = trimmed.split(":")
-                            val host = parts[0]
-                            val port = parts.getOrNull(1)?.toIntOrNull() ?: 41433
-                            viewModel.pairWithHost(host, port)
-                            true
-                        } else {
-                            false
-                        }
-                    }
+                    { input: String -> viewModel.pairWithQrUri(input.trim()) }
                 }
                 val onBeam = remember { { device: NearsideDevice -> viewModel.sendClipboard(device) } }
                 val onClear = remember { { viewModel.clearHistory() } }
@@ -224,6 +215,9 @@ class MainActivity : ComponentActivity() {
                     onUnpair = onUnpair,
                     onPairWithCode = onPairCode,
                     onPairWithQrUri = onPairQr,
+                    onOpenQrScanner = { viewModel.openQrScanner() },
+                    onCancelPairing = { viewModel.cancelPairing() },
+                    onRetryPairingScan = { viewModel.retryPairingScan() },
                     onPairDiscovered = onPairDiscovered,
                     onSendFiles = onSend,
                     onBeamClipboard = onBeam,
@@ -251,6 +245,9 @@ fun MainScreen(
     onUnpair: (String) -> Unit,
     onPairWithCode: (String) -> Unit,
     onPairWithQrUri: (String) -> Boolean,
+    onOpenQrScanner: () -> Unit,
+    onCancelPairing: () -> Unit,
+    onRetryPairingScan: () -> Unit,
     onPairDiscovered: (NearsideDevice) -> Unit = {},
     onSendFiles: (NearsideDevice, List<Uri>) -> Unit,
     onBeamClipboard: (NearsideDevice) -> Unit,
@@ -300,6 +297,11 @@ fun MainScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = { showQrDialog = false; onOpenQrScanner() }) {
+                        Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Scan QR")
+                    }
                     IconButton(onClick = { showDiagnosticsDialog = true }) {
                         Icon(
                             imageVector = Icons.Default.Info,
@@ -584,16 +586,22 @@ fun MainScreen(
         }
     }
 
-    if (showQrDialog) {
+    if (showQrDialog || uiState.pairingFlow != null) {
+        key(uiState.pairingFlow?.requestId ?: "local-qr") {
         QrPairingDialog(
             fingerprint = uiState.localFingerprint,
-            onDismiss = { showQrDialog = false },
+            initialMode = if (uiState.pairingFlow != null) "scan" else "show",
+            pairingFlow = uiState.pairingFlow,
+            onDismiss = { showQrDialog = false; onCancelPairing() },
+            onStartScan = { showQrDialog = false; onOpenQrScanner() },
+            onRetryScan = onRetryPairingScan,
             onPairWithUri = { uri ->
-                val ok = onPairWithQrUri(uri)
-                if (ok) showQrDialog = false
-                ok
+                val started = onPairWithQrUri(uri)
+                if (started) showQrDialog = false
+                started
             }
         )
+        }
     }
 
     if (showCodeDialog) {
@@ -1427,12 +1435,18 @@ fun getLocalWifiIp(): String {
 @Composable
 fun QrPairingDialog(
     fingerprint: String,
+    initialMode: String = "scan",
+    pairingFlow: PairingFlowState? = null,
     onDismiss: () -> Unit,
+    onStartScan: () -> Unit,
+    onRetryScan: () -> Unit,
     onPairWithUri: (String) -> Boolean
 ) {
     var uriInput by remember { mutableStateOf("") }
-    var mode by remember { mutableStateOf("show") }
+    var mode by remember { mutableStateOf(initialMode) }
     val isEnteringUri = mode == "manual"
+    val isVerifying = pairingFlow?.phase == PairingPhase.VERIFYING
+    val isFailed = pairingFlow?.phase == PairingPhase.FAILED
     var error by remember { mutableStateOf<String?>(null) }
 
     val localIp = remember { getLocalWifiIp() }
@@ -1447,23 +1461,31 @@ fun QrPairingDialog(
     val qrUri = remember(qrPayload) { qrPayload.toUri() }
     val qrBitmap = remember(qrUri) { generateQrBitmap(qrUri, 512) }
 
-    DisposableEffect(qrPayload) {
-        com.nearside.app.crypto.QRPairingSessions.register(qrPayload)
-        onDispose { com.nearside.app.crypto.QRPairingSessions.unregister(qrPayload.sessionId) }
+    DisposableEffect(mode, qrPayload) {
+        if (mode == "show") com.nearside.app.crypto.QRPairingSessions.register(qrPayload)
+        onDispose { if (mode == "show") com.nearside.app.crypto.QRPairingSessions.unregister(qrPayload.sessionId) }
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isVerifying) onDismiss() },
         title = { Text(text = "Pair with QR Code") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Row {
-                    TextButton(onClick = { mode = "scan"; error = null }) { Text("Scan QR") }
-                    TextButton(onClick = { mode = "show"; error = null }) { Text("Show mine") }
-                }
+                if (isVerifying) {
+                    Text("Verifying this device securely...")
+                    Spacer(modifier = Modifier.height(12.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else if (isFailed) {
+                    Text(pairingFlow?.errorMessage ?: "Pairing failed. Display a fresh QR code and try again.", color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = onRetryScan) { Text("Scan again") }
+                } else {
+                    Row {
+                        TextButton(onClick = onStartScan) { Text("Scan QR") }
+                        TextButton(onClick = { mode = "show"; error = null }) { Text("Show mine") }
+                    }
                 if (mode == "scan") {
                     QrPairingScanner(onCaptured = { uri ->
                         if (!onPairWithUri(uri)) error = "Pairing could not start. Check the QR code and nearby device connection."
@@ -1535,24 +1557,25 @@ fun QrPairingDialog(
                     }
                 }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
             }
         },
         confirmButton = {
-            if (isEnteringUri) {
+            if (isEnteringUri && !isVerifying && !isFailed) {
                 Button(
                     onClick = { if (!onPairWithUri(uriInput.trim())) error = "Invalid, expired, or unreachable pairing QR. Display a fresh code and try again." },
                     enabled = uriInput.isNotBlank()
                 ) {
                     Text(text = "Connect")
                 }
-            } else {
+            } else if (mode == "show" && !isVerifying && !isFailed) {
                 Button(onClick = onDismiss) {
                     Text(text = "Done")
                 }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !isVerifying) {
                 Text(text = "Cancel")
             }
         }

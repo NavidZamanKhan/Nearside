@@ -14,6 +14,8 @@ Nearside uses mutual public-key cryptographic trust pinning:
 - `NS-PAIR-002`: Cryptographic HMAC commitment verification failed.
 - `NS-PAIR-003`: PAKE rate limit exceeded (lockout triggered after 5 failed attempts).
 - `NS-PAIR-004`: Malformed pairing URI or JSON payload.
+- `NS-PAIR-005`: Camera missing, unavailable, interrupted, or unable to start.
+- `NS-PAIR-006`: Camera permission denied or restricted.
 - `NS-TRUST-001`: Inbound transfer from untrusted (unpaired) peer.
 - `NS-TRUST-002`: Blocked peer attempted connection.
 - `NS-TRUST-003`: Peer presented public key differing from pinned SPKI key.
@@ -37,6 +39,19 @@ QR URIs carry `created` and `ttl` in addition to version, session UUID, host ide
 Enrollment uses the existing QR HKDF/HMAC transcript over the session UUID, both identities, and fresh client/server nonces. A `CHALLENGE` response proves the host secret and binds its SPKI digest to the scanned fingerprint. The client confirmation is then verified before the host atomically consumes the in-memory displayed session and enrolls the client. The final `ACCEPTED` proof is checked before client enrollment. Session removal on dialog dismissal, expiry, or success prevents reuse. Blocked peers and pinned key mismatches remain rejected. Pairing frames are capped at 16 KiB.
 
 Failures reuse `NS-PAIR-001` (expired, dismissed, or consumed session), `NS-PAIR-002` (proof mismatch or unauthenticated legacy pairing), `NS-PAIR-004` (malformed QR/frame), and `NS-TRUST-002` / `NS-TRUST-003` (blocked identity / key mismatch). Logs use `pairingSessionId` as `correlationId` and never include the URI, QR secret, nonce/proof bytes, or public-key payload. Camera startup reports a safe native cause without recording image data.
+
+## Main-screen scanning
+
+Android and iOS expose Scan directly in the main toolbar. Opening it requests camera
+permission only when needed. A usable capture pauses the camera and starts the existing
+mutual QR verification; a successful request closes the scanner only after enrollment
+completes. Failures keep an actionable message and explicit retry or URI paste option.
+Returning from app settings rechecks permission. Dismissal and background lifecycle
+stop camera capture; duplicate frames cannot start concurrent handshakes.
+
+Camera failures use `scanQR` / `startScanner`, a scanner correlation ID, and the shared
+camera codes above. Invalid or expired scans use existing payload/session codes.
+Camera images, URI contents, shared secrets and proofs never enter diagnostic logs.
 
 The previously unauthenticated direct-IP/empty-code and short-code network enrollment paths now fail closed with instructions to scan or paste a current QR. Short-code cryptographic utilities remain present, but no verified network PAKE exchange was implemented in the existing application. A plain IP or short code must never establish trust through that old shortcut.
 

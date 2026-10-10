@@ -163,7 +163,15 @@ public struct NearsideHomeView: View {
                     }
                 }
 
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        isShowingPairSheet = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                    .accessibilityLabel("Scan pairing QR code")
+                    .accessibilityIdentifier("scanPairingQR")
+
                     Button {
                         isShowingPairSheet = true
                     } label: {

@@ -40,12 +40,14 @@ data class NearsideUiState(
     val recentTransfers: List<TransferRecord> = emptyList(),
     val activeTransfer: TransferRecord? = null,
     val activePairingCode: String = "4819 2034",
-    val toastMessage: String? = null
+    val toastMessage: String? = null,
+    val pairingFlow: PairingFlowState? = null
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val context: Context = application.applicationContext
+    private val pairingController = PairingFlowController()
     val deviceIdentity: DeviceIdentity = DeviceIdentity.loadOrCreateDefault(context)
     val trustStore: PinnedTrustStore = PinnedTrustStore.fromContext(context)
     val nsdDiscovery: NsdDiscoveryService = NsdDiscoveryService(context)
@@ -66,6 +68,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             trustStore.changes.collect { loadEnrolledAndSeedData() }
+        }
+        viewModelScope.launch {
+            pairingController.state.collect { flow -> _uiState.update { it.copy(pairingFlow = flow) } }
         }
     }
 
@@ -179,43 +184,62 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openQrScanner() = pairingController.openScan()
+
+    fun cancelPairing() {
+        if (pairingController.cancel()) {
+            _uiState.update { it.copy(toastMessage = "Pairing cancelled") }
+        }
+    }
+
+    fun retryPairingScan() = pairingController.retry()
+
     fun pairWithQrUri(uriString: String): Boolean {
-        val payload = QRPairingPayload.fromUri(uriString) ?: run {
-            com.nearside.app.diagnostics.NearsideLogger.warn("pairing", "parseQR", "Malformed pairing URI", state = "rejected", errorCode = com.nearside.app.diagnostics.NearsideErrorCode.PAIRING_MALFORMED_PAYLOAD)
-            _uiState.update { it.copy(toastMessage = "Invalid Nearside pairing QR code") }
+        val attempt = try { pairingController.begin(uriString, deviceIdentity.publicIdentity) }
+        catch (error: com.nearside.app.diagnostics.NearsideError) {
+            com.nearside.app.diagnostics.NearsideLogger.error(error, state = "rejected")
             return false
-        }
-        if (payload.isExpired) {
-            com.nearside.app.diagnostics.NearsideLogger.warn("pairing", "parseQR", "Pairing session expired", state = "rejected", correlationId = payload.sessionId, errorCode = com.nearside.app.diagnostics.NearsideErrorCode.PAIRING_SESSION_EXPIRED)
-            _uiState.update { it.copy(toastMessage = "Pairing QR expired. Display a fresh code.") }
-            return false
-        }
-        val livePeer = _uiState.value.discoveredDevices.firstOrNull { it.id == payload.hostIdentity && it.fingerprint == payload.hostIdentity }
+        } ?: return false
+        val payload = attempt.payload
+        val livePeer = NsdDiscoveryService.findDiscoveredDevice(payload.hostIdentity)
         val host = livePeer?.ipAddress ?: payload.ip
         val port = livePeer?.port ?: payload.port ?: 41433
-        if (!host.isNullOrEmpty()) {
-            viewModelScope.launch {
-                val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore, qrPayload = payload, deviceIdentity = deviceIdentity)
-                res.onSuccess { resp ->
-                    val newDevice = NearsideDevice(
-                        id = resp.serverId,
-                        name = resp.serverName,
-                        platform = DevicePlatform.MACOS,
-                        fingerprint = resp.serverId,
-                        ipAddress = host,
-                        port = port,
-                        reachability = DeviceReachability.ONLINE
-                    )
-                    _uiState.update { current ->
-                        current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
-                    }
-                }.onFailure { error ->
-                    _uiState.update { it.copy(toastMessage = error.message ?: "Pairing failed. Display a fresh QR and try again.") }
-                }
-            }
-            return true
+        if (host.isNullOrBlank()) {
+            val error = com.nearside.app.diagnostics.NearsideError(
+                com.nearside.app.diagnostics.NearsideErrorCode.DISCOVERY_RESOLVE_FAILED,
+                "pairQR", "Pairing device is unavailable. Check that both devices are on the same network.",
+                correlationId = payload.sessionId)
+            com.nearside.app.diagnostics.NearsideLogger.error(error, state = "failed")
+            pairingController.fail(attempt.requestId, error.message)
+            return false
         }
-        return false
+        viewModelScope.launch {
+            val result = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "",
+                trustStore = trustStore, qrPayload = payload, deviceIdentity = deviceIdentity)
+            result.onSuccess { response ->
+                if (response.serverId != payload.hostIdentity || !trustStore.canTransfer(response.serverId)) {
+                    val error = com.nearside.app.diagnostics.NearsideError(
+                        com.nearside.app.diagnostics.NearsideErrorCode.PAIRING_VERIFICATION_FAILED,
+                        "pairQR", "Peer verification or durable enrollment failed", correlationId = payload.sessionId)
+                    com.nearside.app.diagnostics.NearsideLogger.error(error, state = "rejected")
+                    pairingController.fail(attempt.requestId, error.message)
+                } else {
+                    loadEnrolledAndSeedData()
+                    if (pairingController.complete(attempt.requestId)) {
+                        _uiState.update { it.copy(toastMessage = "Paired with ${response.serverName}") }
+                    }
+                }
+            }.onFailure { failure ->
+                val error = failure as? com.nearside.app.diagnostics.NearsideError
+                    ?: com.nearside.app.diagnostics.NearsideError(
+                        com.nearside.app.diagnostics.NearsideErrorCode.PAIRING_VERIFICATION_FAILED,
+                        "pairQR", "Pairing failed. Display a fresh QR code and try again.",
+                        underlyingError = failure, correlationId = payload.sessionId)
+                com.nearside.app.diagnostics.NearsideLogger.error(error, state = "failed")
+                pairingController.fail(attempt.requestId, error.message)
+            }
+        }
+        return true
     }
 
     fun pairWithHost(host: String, port: Int = 41433) {

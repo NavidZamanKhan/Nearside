@@ -13,6 +13,8 @@ public enum NearsideErrorCode: String, Codable, CaseIterable, Sendable {
     case pairingVerificationFailed = "NS-PAIR-002"
     case pairingRateLimitExceeded = "NS-PAIR-003"
     case pairingMalformedPayload = "NS-PAIR-004"
+    case pairingCameraUnavailable = "NS-PAIR-005"
+    case pairingCameraPermissionDenied = "NS-PAIR-006"
 
     // Trust
     case trustUntrustedPeer = "NS-TRUST-001"
