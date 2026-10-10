@@ -112,6 +112,9 @@ public struct PairRequestFrame: Codable, Equatable {
     public let clientSpkiBase64: String
     public let confirmationCode: String
     public let timestamp: Int64
+    public let qrSessionId: String?
+    public let qrNonceBase64: String?
+    public let qrConfirmationBase64: String?
 
     public enum CodingKeys: String, CodingKey {
         case clientId = "client_id"
@@ -120,15 +123,21 @@ public struct PairRequestFrame: Codable, Equatable {
         case clientSpkiBase64 = "client_spki_base64"
         case confirmationCode = "confirmation_code"
         case timestamp
+        case qrSessionId = "qr_session_id"
+        case qrNonceBase64 = "qr_nonce"
+        case qrConfirmationBase64 = "qr_confirmation"
     }
 
-    public init(clientId: String, clientName: String, clientPlatform: String, clientSpkiBase64: String, confirmationCode: String, timestamp: Int64 = Int64(Date().timeIntervalSince1970)) {
+    public init(clientId: String, clientName: String, clientPlatform: String, clientSpkiBase64: String, confirmationCode: String, timestamp: Int64 = Int64(Date().timeIntervalSince1970), qrSessionId: String? = nil, qrNonceBase64: String? = nil, qrConfirmationBase64: String? = nil) {
         self.clientId = clientId
         self.clientName = clientName
         self.clientPlatform = clientPlatform
         self.clientSpkiBase64 = clientSpkiBase64
         self.confirmationCode = confirmationCode
         self.timestamp = timestamp
+        self.qrSessionId = qrSessionId
+        self.qrNonceBase64 = qrNonceBase64
+        self.qrConfirmationBase64 = qrConfirmationBase64
     }
 }
 
@@ -139,6 +148,9 @@ public struct PairResponseFrame: Codable, Equatable {
     public let serverPlatform: String
     public let serverSpkiBase64: String
     public let timestamp: Int64
+    public let qrSessionId: String?
+    public let qrNonceBase64: String?
+    public let qrConfirmationBase64: String?
 
     public enum CodingKeys: String, CodingKey {
         case status
@@ -147,15 +159,21 @@ public struct PairResponseFrame: Codable, Equatable {
         case serverPlatform = "server_platform"
         case serverSpkiBase64 = "server_spki_base64"
         case timestamp
+        case qrSessionId = "qr_session_id"
+        case qrNonceBase64 = "qr_nonce"
+        case qrConfirmationBase64 = "qr_confirmation"
     }
 
-    public init(status: String, serverId: String, serverName: String, serverPlatform: String, serverSpkiBase64: String, timestamp: Int64 = Int64(Date().timeIntervalSince1970)) {
+    public init(status: String, serverId: String, serverName: String, serverPlatform: String, serverSpkiBase64: String, timestamp: Int64 = Int64(Date().timeIntervalSince1970), qrSessionId: String? = nil, qrNonceBase64: String? = nil, qrConfirmationBase64: String? = nil) {
         self.status = status
         self.serverId = serverId
         self.serverName = serverName
         self.serverPlatform = serverPlatform
         self.serverSpkiBase64 = serverSpkiBase64
         self.timestamp = timestamp
+        self.qrSessionId = qrSessionId
+        self.qrNonceBase64 = qrNonceBase64
+        self.qrConfirmationBase64 = qrConfirmationBase64
     }
 }
 

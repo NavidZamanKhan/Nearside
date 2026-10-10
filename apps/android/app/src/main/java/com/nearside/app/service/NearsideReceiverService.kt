@@ -170,6 +170,7 @@ class NearsideReceiverService : Service() {
                     state = "listening"
                 )
                 val trustStore = PinnedTrustStore(this@NearsideReceiverService)
+                val deviceIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(this@NearsideReceiverService)
                 val destDir = (android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
                     ?: filesDir).apply { mkdirs() }
 
@@ -187,6 +188,7 @@ class NearsideReceiverService : Service() {
                                 val result = TransferEngine.handleInboundConnection(
                                     socket = client,
                                     trustStore = trustStore,
+                                    deviceIdentity = deviceIdentity,
                                     destinationDir = destDir,
                                     onProgress = { _, record ->
                                         updateTransferProgressNotification(record)

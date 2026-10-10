@@ -7,6 +7,8 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
+import com.nearside.app.diagnostics.NearsideError
+import com.nearside.app.diagnostics.NearsideErrorCode
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -22,69 +24,91 @@ data class QRPairingPayload(
     val expirySeconds: Double = 180.0
 ) {
     val isExpired: Boolean
-        get() = ((System.currentTimeMillis() / 1000.0) - createdAtSeconds) > expirySeconds
+        get() = !isValidAt(System.currentTimeMillis() / 1000.0)
+
+    fun isValidAt(nowSeconds: Double): Boolean = version == 1 &&
+        createdAtSeconds.isFinite() && expirySeconds.isFinite() && expirySeconds > 0 &&
+        expirySeconds <= 180 && createdAtSeconds <= nowSeconds + 30 &&
+        nowSeconds < createdAtSeconds + expirySeconds
 
     fun toUri(): String {
-        val encodedName = URLEncoder.encode(hostName, "UTF-8")
-        val encodedSec = URLEncoder.encode(sharedSecretBase64, "UTF-8")
-        var uri = "nearside://pair?v=$version&sid=$sessionId&id=$hostIdentity&name=$encodedName&sec=$encodedSec"
+        fun encode(value: String) = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+        val params = linkedMapOf(
+            "v" to version.toString(), "sid" to sessionId, "id" to hostIdentity,
+            "name" to hostName, "sec" to sharedSecretBase64,
+            "created" to createdAtSeconds.toString(), "ttl" to expirySeconds.toString()
+        )
         if (!ip.isNullOrEmpty()) {
-            uri += "&ip=$ip&port=${port ?: 41433}"
+            params["ip"] = ip
+            params["port"] = (port ?: 41433).toString()
         }
-        return uri
+        return "nearside://pair?" + params.entries.joinToString("&") { "${it.key}=${encode(it.value)}" }
     }
 
     companion object {
         fun createNew(hostIdentity: String, hostName: String, ip: String? = null, port: Int? = 41433): QRPairingPayload {
-            val random = SecureRandom()
-            val secretBytes = ByteArray(32)
-            random.nextBytes(secretBytes)
-            val secretBase64 = Base64.getEncoder().encodeToString(secretBytes)
-
-            return QRPairingPayload(
-                sessionId = UUID.randomUUID().toString(),
-                hostIdentity = hostIdentity,
-                hostName = hostName,
-                sharedSecretBase64 = secretBase64,
-                ip = ip,
-                port = port
-            )
+            val secretBytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            return QRPairingPayload(sessionId = UUID.randomUUID().toString(), hostIdentity = hostIdentity,
+                hostName = hostName, sharedSecretBase64 = Base64.getEncoder().encodeToString(secretBytes),
+                ip = ip, port = port)
         }
 
-        fun fromUri(uriString: String): QRPairingPayload? {
-            return try {
-                val uri = URI(uriString)
-                if (uri.scheme != "nearside" || uri.host != "pair") return null
-
-                val query = uri.rawQuery ?: return null
-                val params = query.split("&").mapNotNull { part ->
-                    val pair = part.split("=", limit = 2)
-                    if (pair.size == 2) {
-                        URLDecoder.decode(pair[0], "UTF-8") to URLDecoder.decode(pair[1], "UTF-8")
-                    } else null
-                }.toMap()
-
-                val sid = params["sid"] ?: return null
-                val id = params["id"] ?: return null
-                val sec = params["sec"] ?: return null
-                val name = params["name"] ?: "Nearby Peer"
-                val version = params["v"]?.toIntOrNull() ?: 1
-                val ip = params["ip"]
-                val port = params["port"]?.toIntOrNull() ?: 41433
-
-                QRPairingPayload(
-                    version = version,
-                    sessionId = sid,
-                    hostIdentity = id,
-                    hostName = name,
-                    sharedSecretBase64 = sec,
-                    ip = ip,
-                    port = port
-                )
-            } catch (e: Exception) {
-                null
+        fun fromUri(uriString: String): QRPairingPayload? = try {
+            if (uriString.length > 4096) throw IllegalArgumentException()
+            val uri = URI(uriString)
+            require(uri.scheme == "nearside" && uri.host == "pair" && uri.userInfo == null &&
+                uri.port == -1 && uri.path.isNullOrEmpty() && uri.fragment == null)
+            val params = linkedMapOf<String, String>()
+            for (part in (uri.rawQuery ?: throw IllegalArgumentException()).split("&")) {
+                val pair = part.split("=", limit = 2)
+                require(pair.size == 2)
+                fun decode(value: String) = URLDecoder.decode(value.replace("+", "%2B"), "UTF-8")
+                val key = decode(pair[0])
+                require(!params.containsKey(key))
+                params[key] = decode(pair[1])
             }
+            val sid = params.getValue("sid")
+            require(UUID.fromString(sid).toString().equals(sid, ignoreCase = true))
+            val id = params.getValue("id")
+            require(id.matches(Regex("ns1_[0-9a-f]{64}")))
+            val secret = params.getValue("sec")
+            require(Base64.getDecoder().decode(secret).size == 32)
+            val name = params["name"] ?: "Nearby Peer"
+            require(name.isNotBlank() && name.length <= 255 && name.none { it.isISOControl() })
+            val port = params["port"]?.toInt() ?: 41433
+            require(port in 1..65535)
+            val ip = params["ip"]
+            require(ip == null || (ip.length <= 253 && ip.isNotBlank() && ip.none { it.isWhitespace() || it.isISOControl() }))
+            val payload = QRPairingPayload(version = params.getValue("v").toInt(), sessionId = sid,
+                hostIdentity = id, hostName = name, sharedSecretBase64 = secret, ip = ip, port = port,
+                createdAtSeconds = params.getValue("created").toDouble(), expirySeconds = params.getValue("ttl").toDouble())
+            require(payload.version == 1 && payload.createdAtSeconds.isFinite() && payload.expirySeconds.isFinite() &&
+                payload.expirySeconds > 0 && payload.expirySeconds <= 180)
+            payload
+        } catch (_: Exception) { null }
+    }
+}
+
+/** Active display sessions exist only in memory, expire, and are consumed exactly once. */
+object QRPairingSessions {
+    private val sessions = mutableMapOf<String, QRPairingPayload>()
+    @Synchronized fun register(payload: QRPairingPayload) {
+        sessions.entries.removeAll { it.value.isExpired }
+        sessions[payload.sessionId] = payload
+    }
+    @Synchronized fun unregister(sessionId: String) { sessions.remove(sessionId) }
+    @Synchronized fun requireActive(sessionId: String): QRPairingPayload {
+        val payload = sessions[sessionId] ?: throw NearsideError(NearsideErrorCode.PAIRING_SESSION_EXPIRED,
+            "verifyQR", "Pairing session expired or already used", correlationId = sessionId)
+        if (payload.isExpired) {
+            sessions.remove(sessionId)
+            throw NearsideError(NearsideErrorCode.PAIRING_SESSION_EXPIRED, "verifyQR", "Pairing session expired", correlationId = sessionId)
         }
+        return payload
+    }
+    @Synchronized fun consume(sessionId: String): Boolean {
+        val payload = sessions.remove(sessionId) ?: return false
+        return !payload.isExpired
     }
 }
 

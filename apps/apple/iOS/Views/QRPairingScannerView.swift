@@ -152,23 +152,16 @@ public struct QRPairingScannerView: View {
         isProcessing = true
         errorMessage = nil
 
-        let _ = QRPairingSession(
-            role: .client,
-            localIdentity: appState.deviceIdentity,
-            payload: payload
-        )
-
-        appState.pairDevice(
-            identity: payload.hostIdentity,
-            name: payload.hostName,
-            platform: "macos",
-            publicKey: appState.deviceIdentity.publicKey
-        )
-
-        triggerHapticSuccess()
-        successMessage = "Successfully paired with \(payload.hostName)"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            dismiss()
+        appState.pairWithQrPayload(payload) { result in
+            isProcessing = false
+            switch result {
+            case .success:
+                triggerHapticSuccess()
+                successMessage = "Successfully paired with \(payload.hostName)"
+                dismiss()
+            case .failure(let error):
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -177,28 +170,8 @@ public struct QRPairingScannerView: View {
         isProcessing = true
         errorMessage = nil
 
-        let config = PakeSessionConfig(
-            shortCode: manualCode,
-            serverIdentity: "ns1_peer_\(manualCode.prefix(4))",
-            clientIdentity: appState.deviceIdentity.publicIdentity
-        )
-        let _ = ShortCodePakeParticipant(role: .client, config: config)
-
-        let trimmedName = peerName.trimmingCharacters(in: .whitespaces)
-        let resolvedName = trimmedName.isEmpty ? "Paired Device" : trimmedName
-
-        appState.pairDevice(
-            identity: config.serverIdentity,
-            name: resolvedName,
-            platform: "ios",
-            publicKey: appState.deviceIdentity.publicKey
-        )
-
-        triggerHapticSuccess()
-        successMessage = "Successfully paired with \(resolvedName)"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            dismiss()
-        }
+        isProcessing = false
+        errorMessage = "Short-code network verification is unavailable. Scan a current Nearside QR code."
     }
 
     private func triggerHapticSuccess() {

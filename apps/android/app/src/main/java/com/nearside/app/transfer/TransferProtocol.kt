@@ -124,7 +124,10 @@ data class PairRequestFrame(
     val clientPlatform: String,
     val clientSpkiBase64: String,
     val confirmationCode: String,
-    val timestamp: Long = System.currentTimeMillis() / 1000
+    val timestamp: Long = System.currentTimeMillis() / 1000,
+    val qrSessionId: String? = null,
+    val qrNonceBase64: String? = null,
+    val qrConfirmationBase64: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("client_id", clientId)
@@ -133,6 +136,9 @@ data class PairRequestFrame(
         put("client_spki_base64", clientSpkiBase64)
         put("confirmation_code", confirmationCode)
         put("timestamp", timestamp)
+        qrSessionId?.let { put("qr_session_id", it) }
+        qrNonceBase64?.let { put("qr_nonce", it) }
+        qrConfirmationBase64?.let { put("qr_confirmation", it) }
     }
 
     companion object {
@@ -142,7 +148,10 @@ data class PairRequestFrame(
             clientPlatform = obj.optString("client_platform", obj.optString("client_os", "unknown")),
             clientSpkiBase64 = obj.optString("client_spki_base64", obj.optString("ephemeral_public_key", "")),
             confirmationCode = obj.optString("confirmation_code", ""),
-            timestamp = obj.optLong("timestamp", System.currentTimeMillis() / 1000)
+            timestamp = obj.optLong("timestamp", System.currentTimeMillis() / 1000),
+            qrSessionId = obj.optString("qr_session_id").takeIf { it.isNotEmpty() },
+            qrNonceBase64 = obj.optString("qr_nonce").takeIf { it.isNotEmpty() },
+            qrConfirmationBase64 = obj.optString("qr_confirmation").takeIf { it.isNotEmpty() }
         )
     }
 }
@@ -153,7 +162,10 @@ data class PairResponseFrame(
     val serverName: String,
     val serverPlatform: String,
     val serverSpkiBase64: String,
-    val timestamp: Long = System.currentTimeMillis() / 1000
+    val timestamp: Long = System.currentTimeMillis() / 1000,
+    val qrSessionId: String? = null,
+    val qrNonceBase64: String? = null,
+    val qrConfirmationBase64: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("status", status)
@@ -163,16 +175,22 @@ data class PairResponseFrame(
         put("server_os", serverPlatform)
         put("server_spki_base64", serverSpkiBase64)
         put("timestamp", timestamp)
+        qrSessionId?.let { put("qr_session_id", it) }
+        qrNonceBase64?.let { put("qr_nonce", it) }
+        qrConfirmationBase64?.let { put("qr_confirmation", it) }
     }
 
     companion object {
         fun fromJson(obj: JSONObject): PairResponseFrame = PairResponseFrame(
-            status = obj.optString("status", "ACCEPTED"),
+            status = obj.getString("status"),
             serverId = obj.getString("server_id"),
             serverName = obj.getString("server_name"),
             serverPlatform = obj.optString("server_platform", obj.optString("server_os", "unknown")),
             serverSpkiBase64 = obj.optString("server_spki_base64", obj.optString("ephemeral_public_key", "")),
-            timestamp = obj.optLong("timestamp", System.currentTimeMillis() / 1000)
+            timestamp = obj.optLong("timestamp", System.currentTimeMillis() / 1000),
+            qrSessionId = obj.optString("qr_session_id").takeIf { it.isNotEmpty() },
+            qrNonceBase64 = obj.optString("qr_nonce").takeIf { it.isNotEmpty() },
+            qrConfirmationBase64 = obj.optString("qr_confirmation").takeIf { it.isNotEmpty() }
         )
     }
 }

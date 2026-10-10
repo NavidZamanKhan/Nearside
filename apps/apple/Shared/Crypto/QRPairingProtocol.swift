@@ -45,7 +45,7 @@ public struct QRPairingPayload: Codable {
     }
 
     public var isExpired: Bool {
-        return (Date().timeIntervalSince1970 - createdAt) > expirySeconds
+        return version != 1 || !createdAt.isFinite || !expirySeconds.isFinite || expirySeconds <= 0 || expirySeconds > 180 || createdAt > Date().timeIntervalSince1970 + 30 || Date().timeIntervalSince1970 >= createdAt + expirySeconds
     }
 
     public func toURI() -> String {
@@ -57,7 +57,9 @@ public struct QRPairingPayload: Codable {
             URLQueryItem(name: "sid", value: sessionId),
             URLQueryItem(name: "id", value: hostIdentity),
             URLQueryItem(name: "name", value: hostName),
-            URLQueryItem(name: "sec", value: sharedSecretBase64)
+            URLQueryItem(name: "sec", value: sharedSecretBase64),
+            URLQueryItem(name: "created", value: String(createdAt)),
+            URLQueryItem(name: "ttl", value: String(expirySeconds))
         ]
         if let ip = ip, !ip.isEmpty {
             items.append(URLQueryItem(name: "ip", value: ip))
@@ -68,39 +70,35 @@ public struct QRPairingPayload: Codable {
     }
 
     public static func fromURI(_ uriString: String) -> QRPairingPayload? {
-        guard let components = URLComponents(string: uriString),
-              components.scheme == "nearside",
-              components.host == "pair",
-              let queryItems = components.queryItems else {
-            return nil
+        guard uriString.count <= 4096, let components = URLComponents(string: uriString),
+              components.scheme == "nearside", components.host == "pair", components.user == nil,
+              components.password == nil, components.port == nil, components.path.isEmpty,
+              components.fragment == nil, let queryItems = components.queryItems else { return nil }
+        var dict: [String: String] = [:]
+        for item in queryItems {
+            guard dict[item.name] == nil, let value = item.value else { return nil }
+            dict[item.name] = value
         }
-
-        let dict = Dictionary(uniqueKeysWithValues: queryItems.compactMap { item in
-            item.value.map { (item.name, $0) }
-        })
-
-        guard let sid = dict["sid"],
-              let id = dict["id"],
-              let sec = dict["sec"] else {
-            return nil
-        }
-
+        guard let sid = dict["sid"], let uuid = UUID(uuidString: sid), uuid.uuidString.lowercased() == sid.lowercased(),
+              let id = dict["id"], id.range(of: "^ns1_[0-9a-f]{64}$", options: .regularExpression) != nil,
+              let sec = dict["sec"], let secret = Data(base64Encoded: sec), secret.count == 32,
+              let version = dict["v"].flatMap(Int.init), version == 1,
+              let created = dict["created"].flatMap(Double.init), created.isFinite,
+              let ttl = dict["ttl"].flatMap(Double.init), ttl.isFinite, ttl > 0, ttl <= 180 else { return nil }
         let name = dict["name"] ?? "Nearby Peer"
-        let version = Int(dict["v"] ?? "1") ?? 1
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 255,
+              name.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        let port: Int
+        if let rawPort = dict["port"] {
+            guard let parsed = Int(rawPort), (1...65535).contains(parsed) else { return nil }
+            port = parsed
+        } else { port = 41433 }
         let ip = dict["ip"]
-        let port = dict["port"].flatMap { Int($0) } ?? 41433
-
-        return QRPairingPayload(
-            version: version,
-            sessionId: sid,
-            hostIdentity: id,
-            hostName: name,
-            sharedSecretBase64: sec,
-            ip: ip,
-            port: port,
-            createdAt: Date().timeIntervalSince1970,
-            expirySeconds: 180.0
-        )
+        if let ip = ip {
+            guard !ip.isEmpty, ip.count <= 253, ip.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { return nil }
+        }
+        return QRPairingPayload(version: version, sessionId: sid, hostIdentity: id, hostName: name,
+            sharedSecretBase64: sec, ip: ip, port: port, createdAt: created, expirySeconds: ttl)
     }
 
     private init(
@@ -207,5 +205,34 @@ public final class QRPairingSession {
             result |= (b1 ^ b2)
         }
         return result == 0
+    }
+}
+
+/// Only a currently displayed, unused QR can authorize new enrollment.
+public final class QRPairingSessions {
+    public static let shared = QRPairingSessions()
+    private var sessions: [String: QRPairingPayload] = [:]
+    private let lock = NSLock()
+    public func register(_ payload: QRPairingPayload) {
+        lock.lock(); defer { lock.unlock() }
+        sessions = sessions.filter { !$0.value.isExpired }
+        sessions[payload.sessionId] = payload
+    }
+    public func unregister(_ sessionId: String) {
+        lock.lock(); defer { lock.unlock() }
+        sessions.removeValue(forKey: sessionId)
+    }
+    public func requireActive(_ sessionId: String) throws -> QRPairingPayload {
+        lock.lock(); defer { lock.unlock() }
+        guard let payload = sessions[sessionId], !payload.isExpired else {
+            sessions.removeValue(forKey: sessionId)
+            throw PairingError.sessionExpired
+        }
+        return payload
+    }
+    public func consume(_ sessionId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let payload = sessions.removeValue(forKey: sessionId) else { return false }
+        return !payload.isExpired
     }
 }

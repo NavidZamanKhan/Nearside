@@ -160,161 +160,40 @@ public final class TransferEngine: @unchecked Sendable {
     }
 
     public func initiatePairing(
-        to host: String,
-        port: UInt16 = 41433,
-        confirmationCode: String = "",
-        deviceIdentity: DeviceIdentity,
-        deviceName: String,
-        trustStore: PinnedTrustStore,
+        to host: String, port: UInt16 = 41433, confirmationCode: String = "",
+        deviceIdentity: DeviceIdentity, deviceName: String, trustStore: PinnedTrustStore,
+        qrPayload: QRPairingPayload? = nil,
         completion: @escaping (Result<PairResponseFrame, Error>) -> Void
     ) {
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port) ?? 41433)
-        let connection = NWConnection(to: endpoint, using: .tcp)
-        var hasFinished = false
-
-        func finish(_ result: Result<PairResponseFrame, Error>) {
-            guard !hasFinished else { return }
-            hasFinished = true
-            connection.cancel()
-            completion(result)
-        }
-
-        let timeoutWorkItem = DispatchWorkItem {
-            finish(.failure(TransferEngineError.connectionFailed("Pairing connection timed out")))
-        }
-        queue.asyncAfter(deadline: .now() + 8.0, execute: timeoutWorkItem)
-
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
-            switch state {
-            case .ready:
-                timeoutWorkItem.cancel()
-                self.sendPairRequest(
-                    connection: connection,
-                    confirmationCode: confirmationCode,
-                    deviceIdentity: deviceIdentity,
-                    deviceName: deviceName,
-                    trustStore: trustStore,
-                    finish: finish
-                )
-            case .failed(let err):
-                timeoutWorkItem.cancel()
-                finish(.failure(TransferEngineError.connectionFailed(err.localizedDescription)))
-            case .cancelled:
-                timeoutWorkItem.cancel()
-            default:
-                break
-            }
-        }
-        connection.start(queue: self.queue)
-    }
-
-    private func sendPairRequest(
-        connection: NWConnection,
-        confirmationCode: String,
-        deviceIdentity: DeviceIdentity,
-        deviceName: String,
-        trustStore: PinnedTrustStore,
-        finish: @escaping (Result<PairResponseFrame, Error>) -> Void
-    ) {
-        let req = PairRequestFrame(
-            clientId: deviceIdentity.publicIdentity,
-            clientName: deviceName,
-            clientPlatform: "macos",
-            clientSpkiBase64: deviceIdentity.spkiDer.base64EncodedString(),
-            confirmationCode: confirmationCode
-        )
-        guard let reqData = try? JSONEncoder().encode(req) else {
-            finish(.failure(TransferEngineError.manifestRejected("Failed to encode PairRequestFrame")))
+        guard let payload = qrPayload else {
+            completion(.failure(NearsideError(code: .pairingVerificationFailed, operation: "initiatePairing",
+                message: "Scan or paste a current Nearside QR code to securely pair")))
             return
         }
-
-        var header = Data()
-        var magicBE = TransferChunk.magic.bigEndian
-        header.append(Data(bytes: &magicBE, count: 4))
-        var type = FrameType.pairRequest.rawValue
-        header.append(Data(bytes: &type, count: 1))
-        var lenBE = UInt32(reqData.count).bigEndian
-        header.append(Data(bytes: &lenBE, count: 4))
-        header.append(reqData)
-
-        connection.send(content: header, completion: .contentProcessed { [weak self] error in
-            guard let self = self else { return }
-            if let error = error {
-                finish(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
-                return
-            }
-
-            self.receivePairResponse(connection: connection, trustStore: trustStore, finish: finish)
-        })
-    }
-
-    private func receivePairResponse(
-        connection: NWConnection,
-        trustStore: PinnedTrustStore,
-        finish: @escaping (Result<PairResponseFrame, Error>) -> Void
-    ) {
-        connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { headerData, _, _, error in
-            if let error = error {
-                finish(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
-                return
-            }
-            guard let data = headerData, data.count == 9 else {
-                finish(.failure(TransferEngineError.connectionFailed("Invalid pair response header length")))
-                return
-            }
-
-            let magic = data.subdata(in: 0..<4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
-            guard magic == TransferChunk.magic else {
-                finish(.failure(TransferEngineError.connectionFailed("Invalid protocol magic")))
-                return
-            }
-
-            let frameType = data[4]
-            guard frameType == FrameType.pairResponse.rawValue else {
-                finish(.failure(TransferEngineError.connectionFailed("Unexpected frame type: \(frameType)")))
-                return
-            }
-
-            let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
-            connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, respError in
-                if let respError = respError {
-                    finish(.failure(TransferEngineError.connectionFailed(respError.localizedDescription)))
-                    return
-                }
-                guard let payload = payloadData,
-                      let pairResp = try? JSONDecoder().decode(PairResponseFrame.self, from: payload) else {
-                    finish(.failure(TransferEngineError.manifestRejected("Invalid pair response JSON")))
-                    return
-                }
-
-                guard pairResp.status == "ACCEPTED" else {
-                    finish(.failure(TransferEngineError.manifestRejected("Pairing rejected by peer: \(pairResp.status)")))
-                    return
-                }
-
-                guard let spkiData = Data(base64Encoded: pairResp.serverSpkiBase64),
-                      let peerPublicKey = try? P256.Signing.PublicKey(derRepresentation: spkiData) else {
-                    finish(.failure(TransferEngineError.untrustedPeer("Invalid peer public key SPKI")))
-                    return
-                }
-
-                let computedId = DeviceIdentity.computeIdentity(fromSpki: spkiData)
-                guard computedId == pairResp.serverId else {
-                    finish(.failure(TransferEngineError.untrustedPeer("Peer identity does not match SPKI digest")))
-                    return
-                }
-
-                trustStore.enroll(
-                    identity: pairResp.serverId,
-                    name: pairResp.serverName,
-                    platform: pairResp.serverPlatform,
-                    publicKey: peerPublicKey
-                )
-
-                finish(.success(pairResp))
+        guard !payload.isExpired else {
+            completion(.failure(PairingError.sessionExpired.toNearsideError(correlationId: payload.sessionId)))
+            return
+        }
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        var finished = false
+        var started = false
+        func finish(_ result: Result<PairResponseFrame, Error>) {
+            guard !finished else { return }; finished = true
+            connection.cancel(); completion(result)
+        }
+        queue.asyncAfter(deadline: .now() + 15) { if !finished { finish(.failure(NearsideError(code: .connectionTimedOut,
+            operation: "pairQR", message: "Pairing exchange timed out", correlationId: payload.sessionId))) } }
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                guard !started else { return }; started = true
+                self.startQRPairClient(connection: connection, identity: deviceIdentity, name: deviceName,
+                    payload: payload, trustStore: trustStore, host: host, port: port, finish: finish)
+            case .failed(let error): finish(.failure(error))
+            default: break
             }
         }
+        connection.start(queue: queue)
     }
 
     public func cancelTransfer(id: String) {
@@ -788,79 +667,19 @@ public final class TransferEngine: @unchecked Sendable {
             let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
 
             if frameType == FrameType.pairRequest.rawValue {
-                connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, reqError in
-                    if let reqError = reqError {
-                        let err = NearsideError(code: .connectionClosed, operation: "readPairRequest", message: reqError.localizedDescription, underlyingError: reqError, correlationId: connectionId)
-                        onComplete(.failure(err))
-                        return
-                    }
-                    guard let payload = payloadData,
-                          let pairReq = try? JSONDecoder().decode(PairRequestFrame.self, from: payload),
-                          let spkiData = Data(base64Encoded: pairReq.clientSpkiBase64),
-                          let clientPublicKey = try? P256.Signing.PublicKey(derRepresentation: spkiData) else {
-                        self.sendError(connection: connection, code: 400, reason: "INVALID_PAIR_REQUEST", detail: "Malformed pair request")
-                        onComplete(.failure(TransferEngineError.manifestRejected("Invalid pair request")))
-                        return
-                    }
-
-                    let computedId = DeviceIdentity.computeIdentity(fromSpki: spkiData)
-                    guard computedId == pairReq.clientId else {
-                        self.sendError(connection: connection, code: 400, reason: "IDENTITY_MISMATCH", detail: "SPKI mismatch")
-                        onComplete(.failure(TransferEngineError.untrustedPeer("Client identity does not match SPKI")))
-                        return
-                    }
-
-                    trustStore.enroll(
-                        identity: pairReq.clientId,
-                        name: pairReq.clientName,
-                        platform: pairReq.clientPlatform,
-                        publicKey: clientPublicKey
-                    )
-
-                    #if os(macOS)
-                    let devName = Host.current().localizedName ?? "Mac"
-                    #else
-                    let devName = UIDevice.current.name
-                    #endif
-
-                    let myIdentity = DeviceIdentity.loadOrCreateDefault()
-                    let resp = PairResponseFrame(
-                        status: "ACCEPTED",
-                        serverId: myIdentity.publicIdentity,
-                        serverName: devName,
-                        serverPlatform: "macos",
-                        serverSpkiBase64: myIdentity.spkiDer.base64EncodedString()
-                    )
-                    guard let respData = try? JSONEncoder().encode(resp) else {
+                guard (1...16384).contains(len), data.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic else {
+                    connection.cancel()
+                    onComplete(.failure(PairingError.malformedPayload.toNearsideError(correlationId: connectionId)))
+                    return
+                }
+                connection.receive(minimumIncompleteLength: len, maximumLength: len) { payload, _, _, error in
+                    guard error == nil, let payload = payload, payload.count == len,
+                          let request = try? JSONDecoder().decode(PairRequestFrame.self, from: payload) else {
                         connection.cancel()
+                        onComplete(.failure(PairingError.malformedPayload.toNearsideError(correlationId: connectionId)))
                         return
                     }
-
-                    var respHeader = Data()
-                    var magicBE = TransferChunk.magic.bigEndian
-                    respHeader.append(Data(bytes: &magicBE, count: 4))
-                    var type = FrameType.pairResponse.rawValue
-                    respHeader.append(Data(bytes: &type, count: 1))
-                    var respLenBE = UInt32(respData.count).bigEndian
-                    respHeader.append(Data(bytes: &respLenBE, count: 4))
-                    respHeader.append(respData)
-
-                    connection.send(content: respHeader, completion: .contentProcessed { _ in
-                        connection.cancel()
-                        let pairRecord = TransferRecord(
-                            id: "pair_\(pairReq.clientId.prefix(8))",
-                            deviceName: pairReq.clientName,
-                            devicePlatform: .android,
-                            direction: .incoming,
-                            filename: "Pairing Handshake",
-                            fileCount: 0,
-                            totalSizeBytes: 0,
-                            progress: 1.0,
-                            status: .completed,
-                            timestamp: Date()
-                        )
-                        onComplete(.success(pairRecord))
-                    })
+                    self.handleQRPairRequest(connection: connection, request: request, trustStore: trustStore, onComplete: onComplete)
                 }
                 return
             }
@@ -1202,5 +1021,149 @@ public final class TransferEngine: @unchecked Sendable {
         }
 
         receiveNext()
+    }
+}
+
+
+extension TransferEngine {
+    private func sendPairFrame<T: Encodable>(_ value: T, type: FrameType, connection: NWConnection,
+        completion: @escaping (Error?) -> Void) {
+        do {
+            let payload = try JSONEncoder().encode(value)
+            guard (1...16384).contains(payload.count) else { throw PairingError.malformedPayload }
+            var data = Data(); var magic = TransferChunk.magic.bigEndian
+            data.append(Data(bytes: &magic, count: 4)); data.append(type.rawValue)
+            var length = UInt32(payload.count).bigEndian; data.append(Data(bytes: &length, count: 4)); data.append(payload)
+            connection.send(content: data, completion: .contentProcessed(completion))
+        } catch { completion(error) }
+    }
+
+    private func receivePairFrame<T: Decodable>(_ type: T.Type, frameType: FrameType, connection: NWConnection,
+        completion: @escaping (Result<T, Error>) -> Void) {
+        connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { data, _, _, error in
+            if let error = error { completion(.failure(error)); return }
+            guard let data = data, data.count == 9,
+                  data.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic,
+                  data[4] == frameType.rawValue else { completion(.failure(PairingError.malformedPayload)); return }
+            let length = Int(data.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+            guard (1...16384).contains(length) else { completion(.failure(PairingError.malformedPayload)); return }
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { payload, _, _, error in
+                if let error = error { completion(.failure(error)); return }
+                guard let payload = payload, payload.count == length else { completion(.failure(PairingError.malformedPayload)); return }
+                do { completion(.success(try JSONDecoder().decode(T.self, from: payload))) }
+                catch { completion(.failure(PairingError.malformedPayload)) }
+            }
+        }
+    }
+
+    private func handleQRPairRequest(connection: NWConnection, request: PairRequestFrame, trustStore: PinnedTrustStore,
+        onComplete: @escaping (Result<TransferRecord, Error>) -> Void) {
+        func fail(_ error: Error) {
+            let diagnostic = (error as? PairingError)?.toNearsideError(correlationId: request.qrSessionId) ?? error
+            if let diagnostic = diagnostic as? NearsideError { NearsideLogger.shared.error(diagnostic, state: "failed") }
+            connection.cancel(); onComplete(.failure(diagnostic))
+        }
+        do {
+            guard let sessionId = request.qrSessionId, let clientNonceString = request.qrNonceBase64,
+                  let clientNonce = Data(base64Encoded: clientNonceString), clientNonce.count == 32,
+                  request.qrConfirmationBase64 == nil else { throw PairingError.malformedPayload }
+            let payload = try QRPairingSessions.shared.requireActive(sessionId)
+            let identity = DeviceIdentity.loadOrCreateDefault()
+            guard payload.hostIdentity == identity.publicIdentity,
+                  let spki = Data(base64Encoded: request.clientSpkiBase64),
+                  DeviceIdentity.computeIdentity(fromSpki: spki) == request.clientId,
+                  let key = try? P256.Signing.PublicKey(derRepresentation: spki) else { throw PairingError.verificationFailed }
+            if case .failure(let error) = trustStore.validatePeer(presentedSpki: spki) {
+                switch error { case .untrustedPeer: break; default: throw error }
+            }
+            let session = QRPairingSession(role: .host, localIdentity: identity, payload: payload)
+            let transcript = session.buildTranscript(remoteNonce: clientNonce, clientIdentity: request.clientId, serverIdentity: identity.publicIdentity)
+            let keys = try session.deriveConfirmationKeys(transcript: transcript)
+            #if os(macOS)
+            let name = Host.current().localizedName ?? "Mac"
+            #else
+            let name = UIDevice.current.name
+            #endif
+            let challenge = PairResponseFrame(status: "CHALLENGE", serverId: identity.publicIdentity, serverName: name,
+                serverPlatform: "macos", serverSpkiBase64: identity.spkiDer.base64EncodedString(), qrSessionId: sessionId,
+                qrNonceBase64: session.localNonce.base64EncodedString(),
+                qrConfirmationBase64: session.generateConfirmation(keys: keys, transcript: transcript).base64EncodedString())
+            sendPairFrame(challenge, type: .pairResponse, connection: connection) { error in
+                if let error = error { fail(error); return }
+                self.receivePairFrame(PairRequestFrame.self, frameType: .pairRequest, connection: connection) { result in
+                    do {
+                        let proof = try result.get()
+                        guard proof.clientId == request.clientId, proof.clientSpkiBase64 == request.clientSpkiBase64,
+                              proof.clientName == request.clientName, proof.clientPlatform == request.clientPlatform,
+                              proof.timestamp == request.timestamp, proof.confirmationCode == request.confirmationCode,
+                              proof.qrSessionId == sessionId, proof.qrNonceBase64 == clientNonceString,
+                              let encoded = proof.qrConfirmationBase64, let mac = Data(base64Encoded: encoded) else { throw PairingError.malformedPayload }
+                        guard !payload.isExpired, session.verifyPeerConfirmation(peerMac: mac, expectedKey: keys.clientKey, transcript: transcript) else { throw PairingError.verificationFailed }
+                        guard QRPairingSessions.shared.consume(sessionId) else { throw PairingError.sessionExpired }
+                        trustStore.enroll(identity: request.clientId, name: request.clientName, platform: request.clientPlatform, publicKey: key)
+                        let accepted = PairResponseFrame(status: "ACCEPTED", serverId: challenge.serverId, serverName: challenge.serverName,
+                            serverPlatform: challenge.serverPlatform, serverSpkiBase64: challenge.serverSpkiBase64,
+                            qrSessionId: sessionId, qrNonceBase64: challenge.qrNonceBase64,
+                            qrConfirmationBase64: session.generateConfirmation(keys: keys, transcript: transcript + Data("nearside-qr-accepted".utf8)).base64EncodedString())
+                        self.sendPairFrame(accepted, type: .pairResponse, connection: connection) { error in
+                            if let error = error { fail(error); return }
+                            connection.cancel()
+                            NearsideLogger.shared.info("pairing", "verifyQR", "Mutual QR pairing completed", state: "completed", correlationId: sessionId)
+                            onComplete(.success(TransferRecord(id: "pair_\(sessionId)", deviceName: request.clientName, devicePlatform: .android,
+                                direction: .incoming, filename: "Pairing Handshake", fileCount: 0, totalSizeBytes: 0,
+                                progress: 1, status: .completed, timestamp: Date())))
+                        }
+                    } catch { fail(error) }
+                }
+            }
+        } catch { fail(error) }
+    }
+
+    private func startQRPairClient(connection: NWConnection, identity: DeviceIdentity, name: String, payload: QRPairingPayload,
+        trustStore: PinnedTrustStore, host: String, port: UInt16, finish: @escaping (Result<PairResponseFrame, Error>) -> Void) {
+        let session = QRPairingSession(role: .client, localIdentity: identity, payload: payload)
+        let request = PairRequestFrame(clientId: identity.publicIdentity, clientName: name, clientPlatform: "macos",
+            clientSpkiBase64: identity.spkiDer.base64EncodedString(), confirmationCode: "", qrSessionId: payload.sessionId,
+            qrNonceBase64: session.localNonce.base64EncodedString())
+        sendPairFrame(request, type: .pairRequest, connection: connection) { error in
+            if let error = error { finish(.failure(error)); return }
+            self.receivePairFrame(PairResponseFrame.self, frameType: .pairResponse, connection: connection) { result in
+                do {
+                    let challenge = try result.get()
+                    guard challenge.status == "CHALLENGE", challenge.serverId == payload.hostIdentity,
+                          challenge.qrSessionId == payload.sessionId,
+                          let spki = Data(base64Encoded: challenge.serverSpkiBase64), DeviceIdentity.computeIdentity(fromSpki: spki) == payload.hostIdentity,
+                          let key = try? P256.Signing.PublicKey(derRepresentation: spki),
+                          let nonceString = challenge.qrNonceBase64, let nonce = Data(base64Encoded: nonceString), nonce.count == 32,
+                          let encoded = challenge.qrConfirmationBase64, let mac = Data(base64Encoded: encoded) else { throw PairingError.verificationFailed }
+                    if case .failure(let error) = trustStore.validatePeer(presentedSpki: spki) {
+                        switch error { case .untrustedPeer: break; default: throw error }
+                    }
+                    let transcript = session.buildTranscript(remoteNonce: nonce, clientIdentity: identity.publicIdentity, serverIdentity: payload.hostIdentity)
+                    let keys = try session.deriveConfirmationKeys(transcript: transcript)
+                    guard session.verifyPeerConfirmation(peerMac: mac, expectedKey: keys.serverKey, transcript: transcript) else { throw PairingError.verificationFailed }
+                    let proof = PairRequestFrame(clientId: request.clientId, clientName: request.clientName, clientPlatform: request.clientPlatform,
+                        clientSpkiBase64: request.clientSpkiBase64, confirmationCode: "", timestamp: request.timestamp,
+                        qrSessionId: payload.sessionId, qrNonceBase64: request.qrNonceBase64,
+                        qrConfirmationBase64: session.generateConfirmation(keys: keys, transcript: transcript).base64EncodedString())
+                    self.sendPairFrame(proof, type: .pairRequest, connection: connection) { error in
+                        if let error = error { finish(.failure(error)); return }
+                        self.receivePairFrame(PairResponseFrame.self, frameType: .pairResponse, connection: connection) { result in
+                            do {
+                                let response = try result.get()
+                                guard !payload.isExpired, response.status == "ACCEPTED", response.serverId == challenge.serverId,
+                                      response.serverSpkiBase64 == challenge.serverSpkiBase64, response.qrSessionId == payload.sessionId,
+                                      response.qrNonceBase64 == nonceString, let finalEncoded = response.qrConfirmationBase64,
+                                      let finalMac = Data(base64Encoded: finalEncoded), session.verifyPeerConfirmation(peerMac: finalMac,
+                                        expectedKey: keys.serverKey, transcript: transcript + Data("nearside-qr-accepted".utf8)) else { throw PairingError.verificationFailed }
+                                trustStore.enroll(identity: response.serverId, name: response.serverName, platform: response.serverPlatform, publicKey: key)
+                                trustStore.updatePeerEndpoint(identity: response.serverId, ip: host, port: port)
+                                finish(.success(response))
+                            } catch { finish(.failure((error as? PairingError)?.toNearsideError(correlationId: payload.sessionId) ?? error)) }
+                        }
+                    }
+                } catch { finish(.failure((error as? PairingError)?.toNearsideError(correlationId: payload.sessionId) ?? error)) }
+            }
+        }
     }
 }

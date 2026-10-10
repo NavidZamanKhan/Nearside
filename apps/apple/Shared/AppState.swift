@@ -247,14 +247,29 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func pairWithPeerAddress(host: String, port: UInt16 = 41433, confirmationCode: String = "", completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
+    public func pairWithQrPayload(_ payload: QRPairingPayload, completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
+        guard !payload.isExpired else {
+            completion?(.failure(PairingError.sessionExpired.toNearsideError(correlationId: payload.sessionId)))
+            return
+        }
+        let live = DiscoveryService.shared.findDiscoveredDevice(identity: payload.hostIdentity)
+        guard let host = live?.ipAddress ?? payload.ip, !host.isEmpty else {
+            completion?(.failure(NearsideError(code: .discoveryResolveFailed, operation: "pairQR", message: "Pairing device is not currently discoverable", correlationId: payload.sessionId)))
+            return
+        }
+        let port = live?.port ?? UInt16(exactly: payload.port ?? 41433) ?? 41433
+        pairWithPeerAddress(host: host, port: port, qrPayload: payload, completion: completion)
+    }
+
+    public func pairWithPeerAddress(host: String, port: UInt16 = 41433, confirmationCode: String = "", qrPayload: QRPairingPayload? = nil, completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
         TransferEngine.shared.initiatePairing(
             to: host,
             port: port,
             confirmationCode: confirmationCode,
             deviceIdentity: self.deviceIdentity,
             deviceName: self.localDeviceName,
-            trustStore: self.trustStore
+            trustStore: self.trustStore,
+            qrPayload: qrPayload
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }

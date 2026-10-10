@@ -297,8 +297,8 @@ public struct PreferencesView: View {
 
                     Button("Confirm Pairing") {
                         let input = shortCodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if let uriPayload = QRPairingPayload.fromURI(input), let ip = uriPayload.ip {
-                            appState.pairWithPeerAddress(host: ip, port: UInt16(uriPayload.port ?? 41433), confirmationCode: "")
+                        if let uriPayload = QRPairingPayload.fromURI(input) {
+                            appState.pairWithQrPayload(uriPayload)
                             showingPairSheet = false
                             shortCodeInput = ""
                         } else if input.contains(".") {
@@ -325,8 +325,12 @@ public struct PreferencesView: View {
         .frame(width: 380, height: 350)
         .onAppear {
             let payload = QRPairingPayload(hostIdentity: appState.localFingerprint, hostName: appState.localDeviceName)
+            QRPairingSessions.shared.register(payload)
             self.qrPayload = payload
             self.localPakeCode = String(format: "%04d %04d", Int.random(in: 1000...9999), Int.random(in: 1000...9999))
+        }
+        .onDisappear {
+            if let payload = qrPayload { QRPairingSessions.shared.unregister(payload.sessionId) }
         }
     }
 

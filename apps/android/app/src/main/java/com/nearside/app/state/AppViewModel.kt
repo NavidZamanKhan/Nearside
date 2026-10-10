@@ -175,12 +175,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun pairWithQrUri(uriString: String): Boolean {
-        val payload = QRPairingPayload.fromUri(uriString) ?: return false
-        val host = payload.ip ?: _uiState.value.discoveredDevices.firstOrNull { it.id == payload.hostIdentity }?.ipAddress
-        val port = payload.port ?: 41433
+        val payload = QRPairingPayload.fromUri(uriString) ?: run {
+            com.nearside.app.diagnostics.NearsideLogger.warn("pairing", "parseQR", "Malformed pairing URI", state = "rejected", errorCode = com.nearside.app.diagnostics.NearsideErrorCode.PAIRING_MALFORMED_PAYLOAD)
+            _uiState.update { it.copy(toastMessage = "Invalid Nearside pairing QR code") }
+            return false
+        }
+        if (payload.isExpired) {
+            com.nearside.app.diagnostics.NearsideLogger.warn("pairing", "parseQR", "Pairing session expired", state = "rejected", correlationId = payload.sessionId, errorCode = com.nearside.app.diagnostics.NearsideErrorCode.PAIRING_SESSION_EXPIRED)
+            _uiState.update { it.copy(toastMessage = "Pairing QR expired. Display a fresh code.") }
+            return false
+        }
+        val livePeer = _uiState.value.discoveredDevices.firstOrNull { it.id == payload.hostIdentity && it.fingerprint == payload.hostIdentity }
+        val host = livePeer?.ipAddress ?: payload.ip
+        val port = livePeer?.port ?: payload.port ?: 41433
         if (!host.isNullOrEmpty()) {
             viewModelScope.launch {
-                val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore)
+                val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore, qrPayload = payload, deviceIdentity = deviceIdentity)
                 res.onSuccess { resp ->
                     val newDevice = NearsideDevice(
                         id = resp.serverId,
@@ -194,6 +204,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update { current ->
                         current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
                     }
+                }.onFailure { error ->
+                    _uiState.update { it.copy(toastMessage = error.message ?: "Pairing failed. Display a fresh QR and try again.") }
                 }
             }
             return true
@@ -202,77 +214,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun pairWithHost(host: String, port: Int = 41433) {
-        viewModelScope.launch {
-            val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore)
-            res.onSuccess { resp ->
-                val newDevice = NearsideDevice(
-                    id = resp.serverId,
-                    name = resp.serverName,
-                    platform = DevicePlatform.MACOS,
-                    fingerprint = resp.serverId,
-                    ipAddress = host,
-                    port = port,
-                    reachability = DeviceReachability.ONLINE
-                )
-                _uiState.update { current ->
-                    current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
-                }
-            }
-        }
+        _uiState.update { it.copy(toastMessage = "To securely pair, scan or paste the other device’s current Nearside QR code.") }
     }
 
     fun pairDiscoveredDevice(device: NearsideDevice) {
-        val host = device.ipAddress ?: com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.id)?.ipAddress
-        val port = device.port ?: 41433
-        if (!host.isNullOrEmpty()) {
-            viewModelScope.launch {
-                val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = "", trustStore = trustStore)
-                res.onSuccess { resp ->
-                    val newDevice = NearsideDevice(
-                        id = resp.serverId,
-                        name = resp.serverName,
-                        platform = device.platform,
-                        fingerprint = resp.serverId,
-                        ipAddress = host,
-                        port = port,
-                        reachability = DeviceReachability.ONLINE
-                    )
-                    _uiState.update { current ->
-                        current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
-                    }
-                }
-            }
-        }
+        _uiState.update { it.copy(toastMessage = "Display a pairing QR on ${device.name}, then select Scan QR.") }
     }
 
     fun pairWithCode(code: String) {
-        val cleanCode = code.replace(" ", "")
-        if (cleanCode.length >= 6) {
-            val nearbyPeer = _uiState.value.discoveredDevices.firstOrNull { disc ->
-                _uiState.value.pairedDevices.none { it.id == disc.id }
-            }
-            if (nearbyPeer != null && !nearbyPeer.ipAddress.isNullOrEmpty()) {
-                val host = nearbyPeer.ipAddress
-                val port = nearbyPeer.port ?: 41433
-                viewModelScope.launch {
-                    val res = TransferEngine.initiatePairing(host = host, port = port, confirmationCode = cleanCode, trustStore = trustStore)
-                    res.onSuccess { resp ->
-                        val newDevice = NearsideDevice(
-                            id = resp.serverId,
-                            name = resp.serverName,
-                            platform = nearbyPeer.platform,
-                            fingerprint = resp.serverId,
-                            ipAddress = host,
-                            port = port,
-                            reachability = DeviceReachability.ONLINE
-                        )
-                        _uiState.update { current ->
-                            current.copy(pairedDevices = current.pairedDevices.filterNot { it.id == resp.serverId } + newDevice)
-                        }
-                    }
-                }
-            }
-        }
+        _uiState.update { it.copy(toastMessage = "Short-code network verification is unavailable. Scan or paste a current pairing QR code.") }
     }
 
     fun sendFiles(files: List<java.io.File>, device: NearsideDevice) {

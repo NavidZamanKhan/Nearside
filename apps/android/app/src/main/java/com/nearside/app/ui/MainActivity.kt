@@ -1,5 +1,7 @@
 package com.nearside.app.ui
 
+import androidx.compose.runtime.DisposableEffect
+
 import com.nearside.app.discovery.deduplicateDevicesByIdentity
 
 import android.Manifest
@@ -589,6 +591,7 @@ fun MainScreen(
             onPairWithUri = { uri ->
                 val ok = onPairWithQrUri(uri)
                 if (ok) showQrDialog = false
+                ok
             }
         )
     }
@@ -1425,10 +1428,12 @@ fun getLocalWifiIp(): String {
 fun QrPairingDialog(
     fingerprint: String,
     onDismiss: () -> Unit,
-    onPairWithUri: (String) -> Unit
+    onPairWithUri: (String) -> Boolean
 ) {
     var uriInput by remember { mutableStateOf("") }
-    var isEnteringUri by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf("show") }
+    val isEnteringUri = mode == "manual"
+    var error by remember { mutableStateOf<String?>(null) }
 
     val localIp = remember { getLocalWifiIp() }
     val qrPayload = remember(fingerprint) {
@@ -1442,17 +1447,30 @@ fun QrPairingDialog(
     val qrUri = remember(qrPayload) { qrPayload.toUri() }
     val qrBitmap = remember(qrUri) { generateQrBitmap(qrUri, 512) }
 
+    DisposableEffect(qrPayload) {
+        com.nearside.app.crypto.QRPairingSessions.register(qrPayload)
+        onDispose { com.nearside.app.crypto.QRPairingSessions.unregister(qrPayload.sessionId) }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = if (isEnteringUri) "Connect via URI or IP" else "Pair with QR Code") },
+        title = { Text(text = "Pair with QR Code") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (isEnteringUri) {
+                Row {
+                    TextButton(onClick = { mode = "scan"; error = null }) { Text("Scan QR") }
+                    TextButton(onClick = { mode = "show"; error = null }) { Text("Show mine") }
+                }
+                if (mode == "scan") {
+                    QrPairingScanner(onCaptured = { uri ->
+                        if (!onPairWithUri(uri)) error = "Pairing could not start. Check the QR code and nearby device connection."
+                    }, onManualEntry = { mode = "manual" })
+                } else if (isEnteringUri) {
                     Text(
-                        text = "Paste or enter the nearside://pair URI or Mac IP address:",
+                        text = "Paste the current nearside://pair URI from the other device:",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1460,14 +1478,14 @@ fun QrPairingDialog(
                     OutlinedTextField(
                         value = uriInput,
                         onValueChange = { uriInput = it },
-                        label = { Text(text = "nearside://pair?... or 192.168.0.x") },
+                        label = { Text(text = "nearside://pair?...") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = false,
                         maxLines = 3
                     )
                 } else {
                     Text(
-                        text = "Scan this code with Nearside on your Mac or enter this phone's IP:",
+                        text = "Scan this code using Nearside on the other device:",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1511,15 +1529,18 @@ fun QrPairingDialog(
                     )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-                TextButton(onClick = { isEnteringUri = !isEnteringUri }) {
-                    Text(text = if (isEnteringUri) "Show My QR Code" else "Enter URI or IP Manually")
+                if (mode != "scan") {
+                    TextButton(onClick = { mode = if (isEnteringUri) "show" else "manual" }) {
+                        Text(text = if (isEnteringUri) "Show My QR Code" else "Paste URI manually")
+                    }
                 }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
             if (isEnteringUri) {
                 Button(
-                    onClick = { onPairWithUri(uriInput.trim()) },
+                    onClick = { if (!onPairWithUri(uriInput.trim())) error = "Invalid, expired, or unreachable pairing QR. Display a fresh code and try again." },
                     enabled = uriInput.isNotBlank()
                 ) {
                     Text(text = "Connect")
