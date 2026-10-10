@@ -17,6 +17,7 @@ public final class DiscoveryService: @unchecked Sendable {
     public var onInboundConnection: ((NWConnection) -> Void)?
 
     private var discoveredMap: [String: NearsideDevice] = [:]
+    private var discoveredEndpoints: [String: NWEndpoint] = [:]
 
     public init() {}
 
@@ -55,6 +56,7 @@ public final class DiscoveryService: @unchecked Sendable {
                 self.browser?.cancel()
                 self.browser = nil
                 self.discoveredMap.removeAll()
+                self.discoveredEndpoints.removeAll()
                 DispatchQueue.main.async { [weak self] in
                     self?.onDiscoveredDevicesChanged?([])
                 }
@@ -83,7 +85,7 @@ public final class DiscoveryService: @unchecked Sendable {
             self.listener = newListener
 
             let sanitizedName = localDeviceName.replacingOccurrences(of: "'", with: "")
-            let serviceName = "Nearside-\(sanitizedName)"
+            let serviceName = "Nearside-\(sanitizedName)-\(localIdentity.suffix(8))"
 
             var txt = NWTXTRecord()
             txt["v"] = "1"
@@ -139,7 +141,7 @@ public final class DiscoveryService: @unchecked Sendable {
     private func updateTxtRecord() {
         guard let listener = listener else { return }
         let sanitizedName = localDeviceName.replacingOccurrences(of: "'", with: "")
-        let serviceName = "Nearside-\(sanitizedName)"
+        let serviceName = "Nearside-\(sanitizedName)-\(localIdentity.suffix(8))"
 
         var txt = NWTXTRecord()
         txt["v"] = "1"
@@ -168,6 +170,8 @@ public final class DiscoveryService: @unchecked Sendable {
     private func setupBrowser() {
         browser?.cancel()
         discoveredMap.removeAll()
+        discoveredEndpoints.removeAll()
+        DispatchQueue.main.async { [weak self] in self?.onDiscoveredDevicesChanged?([]) }
 
         let descriptor = NWBrowser.Descriptor.bonjour(type: "_nearside._tcp", domain: nil)
         let parameters = NWParameters.tcp
@@ -175,7 +179,7 @@ public final class DiscoveryService: @unchecked Sendable {
         self.browser = newBrowser
 
         newBrowser.browseResultsChangedHandler = { [weak self] results, changes in
-            guard let self = self else { return }
+            guard let self = self, self.browser === newBrowser else { return }
             self.handleBrowseResults(results)
         }
 
@@ -196,13 +200,14 @@ public final class DiscoveryService: @unchecked Sendable {
 
     private func handleBrowseResults(_ results: Set<NWBrowser.Result>) {
         var updatedDevices: [String: NearsideDevice] = [:]
+        var updatedEndpoints: [String: NWEndpoint] = [:]
 
         for result in results {
             guard case let .bonjour(txtRecord) = result.metadata else {
                 continue
             }
 
-            guard let peerId = txtRecord["id"], !peerId.isEmpty else {
+            guard let peerId = txtRecord["id"], peerId.range(of: "^ns1_[0-9a-f]{64}$", options: .regularExpression) != nil else {
                 continue
             }
 
@@ -252,12 +257,11 @@ public final class DiscoveryService: @unchecked Sendable {
             )
 
             updatedDevices[peerId] = device
-            if let ip = endpointHost, !ip.isEmpty, !ip.hasPrefix("Nearside-") {
-                PinnedTrustStore().updatePeerEndpoint(identity: peerId, ip: ip, port: endpointPort ?? 41433)
-            }
+            updatedEndpoints[peerId] = result.endpoint
         }
 
         self.discoveredMap = updatedDevices
+        self.discoveredEndpoints = updatedEndpoints
         let deviceList = Array(updatedDevices.values)
         DispatchQueue.main.async { [weak self] in
             self?.onDiscoveredDevicesChanged?(deviceList)
@@ -266,8 +270,13 @@ public final class DiscoveryService: @unchecked Sendable {
 
     public func findDiscoveredDevice(identity: String) -> NearsideDevice? {
         return queue.sync {
-            discoveredMap[identity] ?? discoveredMap.values.first(where: { $0.id == identity || $0.fingerprint == identity })
+            discoveredMap[identity].flatMap { $0.id == identity && $0.fingerprint == identity ? $0 : nil }
         }
+    }
+
+    /// A Bonjour service endpoint is resolved by Network.framework on each new connection.
+    public func discoveredEndpoint(identity: String) -> NWEndpoint? {
+        queue.sync { discoveredEndpoints[identity] }
     }
 
     public func stop() {
@@ -278,6 +287,7 @@ public final class DiscoveryService: @unchecked Sendable {
             self.browser?.cancel()
             self.browser = nil
             self.discoveredMap.removeAll()
+            self.discoveredEndpoints.removeAll()
             DispatchQueue.main.async { [weak self] in
                 self?.onDiscoveredDevicesChanged?([])
             }

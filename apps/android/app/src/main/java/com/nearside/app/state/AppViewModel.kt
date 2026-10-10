@@ -11,6 +11,7 @@ import com.nearside.app.crypto.QRPairingPayload
 import com.nearside.app.crypto.QRPairingSession
 import com.nearside.app.crypto.ShortCodePakeParticipant
 import com.nearside.app.discovery.NsdDiscoveryService
+import com.nearside.app.discovery.deduplicateDevicesByIdentity
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.DeviceReachability
 import com.nearside.app.model.NearsideDevice
@@ -112,23 +113,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             nsdDiscovery.discoveredDevices.collect { discovered ->
-                if (discovered.isNotEmpty()) {
-                    _uiState.update { current ->
-                        val updatedPaired = current.pairedDevices.map { paired ->
-                            val match = discovered.find { it.id == paired.id || it.fingerprint == paired.fingerprint }
-                            if (match != null && match.ipAddress != null) {
-                                paired.copy(
-                                    ipAddress = match.ipAddress,
-                                    port = match.port,
-                                    reachability = match.reachability
-                                )
-                            } else paired
-                        }
-                        current.copy(
-                            discoveredDevices = discovered,
-                            pairedDevices = updatedPaired
-                        )
+                val peers = deduplicateDevicesByIdentity(discovered)
+                _uiState.update { current ->
+                    val updatedPaired = current.pairedDevices.map { paired ->
+                        val match = peers.find { it.id == paired.id || it.fingerprint == paired.fingerprint }
+                        if (match != null && match.ipAddress != null) {
+                            paired.copy(
+                                ipAddress = match.ipAddress,
+                                port = match.port,
+                                reachability = match.reachability
+                            )
+                        } else paired.copy(reachability = DeviceReachability.UNREACHABLE)
                     }
+                    current.copy(discoveredDevices = peers, pairedDevices = updatedPaired)
                 }
             }
         }

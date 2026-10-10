@@ -1,5 +1,7 @@
 package com.nearside.app.ui
 
+import com.nearside.app.discovery.deduplicateDevicesByIdentity
+
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -499,7 +501,7 @@ fun MainScreen(
                     }
                 }
             } else {
-                items(uiState.pairedDevices, key = { it.id }) { device ->
+                items(deduplicateDevicesByIdentity(uiState.pairedDevices), key = { it.fingerprint.ifBlank { it.id } }) { device ->
                     DeviceRowCard(
                         device = device,
                         onSendFilesClick = {
@@ -517,8 +519,8 @@ fun MainScreen(
             }
 
             // Discovered Peers Section
-            val unpairedDiscovered = uiState.discoveredDevices.filter { disc ->
-                uiState.pairedDevices.none { paired -> paired.id == disc.id }
+            val unpairedDiscovered = deduplicateDevicesByIdentity(uiState.discoveredDevices).filter { disc ->
+                uiState.pairedDevices.none { paired -> paired.fingerprint == disc.fingerprint || paired.id == disc.id }
             }
             if (unpairedDiscovered.isNotEmpty()) {
                 item {
