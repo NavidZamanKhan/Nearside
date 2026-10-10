@@ -80,3 +80,9 @@ Only the selected identity is considered; display names, an arbitrary nearby dev
 The default retry limit is three attempts, with at most ten allowed by configuration and a thirty-second ceiling on backoff. A completed transfer updates endpoint metadata without changing the enrolled identity or public key. macOS persists blocked identities alongside trust records and accepts the previous records-only storage format.
 
 For manual validation, pair the devices, transfer a small file, change the recipient's Wi-Fi/DHCP address, and send again from the existing paired-device entry. Confirm one recipient identity remains, the new address is used, and the file checksum matches. Repeat with the recipient offline to confirm bounded failure; block the recipient and verify discovery cannot restore transfer permission.
+
+## 7. Authenticated Transport
+
+Transfers use the mutually authenticated ECDH/AES-GCM transport specified in [SECURE_TRANSFER_V2.md](../../protocol/SECURE_TRANSFER_V2.md). A discovery identity is confirmed against the pinned SPKI before any manifest/file bytes are sent. Retries authenticate again and cached addresses update only after an encrypted receiver completion ACK confirms size and checksums. Both devices must support version 2; older plaintext senders are rejected.
+
+Authentication, recipient-identity mismatch, and encrypted record authentication failures reuse `NS-TRUST-003`; unpaired and blocked peers retain `NS-TRUST-001` and `NS-TRUST-002`. Handshake/read timeouts preserve `NS-CONN-001` or the native transport error, and bounded retry exhaustion remains `NS-TRANSFER-003`. Destination-file preparation/write/close failures produce `NS-STORAGE-002` and cannot produce a completion ACK. Logs contain no handshake payloads, signatures, key material, or file contents.

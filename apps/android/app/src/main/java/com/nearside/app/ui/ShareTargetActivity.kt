@@ -62,7 +62,7 @@ class ShareTargetActivity : ComponentActivity() {
 
         val sharedSummary = parseIncomingShareIntent(intent)
 
-        val trustStore = PinnedTrustStore(this)
+        val trustStore = PinnedTrustStore.fromContext(this)
         val knownDevices = trustStore.allEnrolledPeers().map { record ->
             val platform = when (record.platformRaw.lowercase()) {
                 "macos" -> DevicePlatform.MACOS

@@ -78,6 +78,10 @@ internal suspend fun <T> retryPeerEndpoint(
                 endpoint = refresh() ?: latest() ?: endpoint
                 pause(policy.delayMs(attempt))
             }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            return Result.failure(error)
         }
     }
     return Result.failure(lastError ?: java.io.IOException("Peer endpoint retries exhausted"))
@@ -197,13 +201,14 @@ object TransferEngine {
         retryPolicy: RetryPolicy = RetryPolicy(),
         peerIdentity: String? = null,
         trustStore: PinnedTrustStore? = null,
+        deviceIdentity: com.nearside.app.crypto.DeviceIdentity? = null,
         onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
         val (manifest, tempFile) = buildTextManifest(text, isUrl, senderId)
         try {
             sendManifest(listOf(tempFile), manifest, host, port, senderId, retryPolicy,
-                peerIdentity, trustStore, onProgress, onProgressMetrics)
+                peerIdentity, trustStore, deviceIdentity, onProgress, onProgressMetrics)
         } finally {
             tempFile.delete()
         }
@@ -217,12 +222,13 @@ object TransferEngine {
         retryPolicy: RetryPolicy = RetryPolicy(),
         peerIdentity: String? = null,
         trustStore: PinnedTrustStore? = null,
+        deviceIdentity: com.nearside.app.crypto.DeviceIdentity? = null,
         onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
         val manifest = buildManifest(files, senderId)
         sendManifest(files, manifest, host, port, senderId, retryPolicy,
-            peerIdentity, trustStore, onProgress, onProgressMetrics)
+            peerIdentity, trustStore, deviceIdentity, onProgress, onProgressMetrics)
     }
 
     private suspend fun sendManifest(
@@ -234,10 +240,14 @@ object TransferEngine {
         retryPolicy: RetryPolicy,
         peerIdentity: String?,
         trustStore: PinnedTrustStore?,
+        deviceIdentity: com.nearside.app.crypto.DeviceIdentity?,
         onProgress: (Float, Long, Long) -> Unit,
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)?
     ): Result<TransferManifest> {
-        if (peerIdentity != null && trustStore?.canTransfer(peerIdentity) != true) {
+        if (peerIdentity == null || trustStore == null || deviceIdentity == null || deviceIdentity.publicIdentity != senderId) {
+            return Result.failure(secureFailure("Persistent sender identity and paired recipient are required"))
+        }
+        if (!trustStore.canTransfer(peerIdentity)) {
             val code = if (trustStore?.isBlocked(peerIdentity) == true)
                 NearsideErrorCode.TRUST_PEER_BLOCKED else NearsideErrorCode.TRUST_UNTRUSTED_PEER
             return Result.failure(NearsideError(code, "sendFiles", "Pair the selected peer before sending",
@@ -261,7 +271,7 @@ object TransferEngine {
                 peerIdentity?.let { PeerEndpoint.fromDiscovery(it, NsdDiscoveryService.refreshDiscoveredDevice(it)) }
             },
             send = { endpoint ->
-                performSendAttempt(files, manifest, endpoint.host, endpoint.port, onProgress, onProgressMetrics)
+                performSendAttempt(files, manifest, endpoint.host, endpoint.port, peerIdentity, trustStore, deviceIdentity, onProgress, onProgressMetrics)
             },
             onRetry = { attempt, error ->
                 NearsideLogger.warn("connection", "refreshPeerEndpoint", "Refreshing selected peer endpoint before retry",
@@ -286,6 +296,9 @@ object TransferEngine {
         manifest: TransferManifest,
         host: String,
         port: Int,
+        peerIdentity: String,
+        trustStore: PinnedTrustStore,
+        deviceIdentity: com.nearside.app.crypto.DeviceIdentity,
         onProgress: (Float, Long, Long) -> Unit,
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> {
@@ -299,8 +312,10 @@ object TransferEngine {
             throw error
         }
         socket.use {
-            val out = DataOutputStream(socket.getOutputStream())
-            val input = DataInputStream(socket.getInputStream())
+            val channel = SecureTransferChannel.client(DataInputStream(socket.getInputStream()),
+                DataOutputStream(socket.getOutputStream()), deviceIdentity, peerIdentity, trustStore)
+            val out = channel.output
+            val input = channel.input
 
             NearsideLogger.info(
                 subsystem = "connection",
@@ -333,11 +348,15 @@ object TransferEngine {
                 return Result.failure(err)
             }
             val ackLen = input.readInt()
+            if (ackLen !in 1..16384) throw secureFailure("Invalid acknowledgment size")
             val ackPayload = ByteArray(ackLen)
             input.readFully(ackPayload)
 
             val ackJson = JSONObject(String(ackPayload, Charsets.UTF_8))
             val ack = TransferAck.fromJson(ackJson)
+            if (ack.transferId != manifest.transferId || ack.bytesReceived !in 0..manifest.totalBytes) {
+                return Result.failure(secureFailure("Acknowledgment does not match transfer"))
+            }
             if (ack.status != "ACCEPTED") {
                 val err = NearsideError(NearsideErrorCode.TRANSFER_REJECTED, "performSendAttempt", "Transfer rejected: ${ack.status}", correlationId = manifest.transferId)
                 NearsideLogger.error(err, state = "rejected")
@@ -422,6 +441,17 @@ object TransferEngine {
             out.write(cHeader.array())
             out.flush()
 
+            if (input.readInt() != TransferChunk.MAGIC || input.readByte() != FrameType.ACK.code) {
+                return Result.failure(secureFailure("Receiver completion acknowledgment required"))
+            }
+            val finalLength = input.readInt()
+            if (finalLength !in 1..16384) throw secureFailure("Invalid completion acknowledgment size")
+            val finalBytes = ByteArray(finalLength); input.readFully(finalBytes)
+            val finalAck = TransferAck.fromJson(JSONObject(String(finalBytes, Charsets.UTF_8)))
+            if (finalAck.transferId != manifest.transferId || finalAck.status != "COMPLETED" || finalAck.bytesReceived != manifest.totalBytes) {
+                return Result.failure(secureFailure("Receiver did not verify transfer completion"))
+            }
+
             onProgress(1.0f, totalBytes, totalBytes)
             onProgressMetrics?.invoke(1.0f, totalBytes, totalBytes, 0.0, 0L)
             NearsideLogger.info(
@@ -454,8 +484,8 @@ object TransferEngine {
         try {
             socket.tcpNoDelay = true
             socket.soTimeout = 15000
-            val input = DataInputStream(socket.getInputStream())
-            val out = DataOutputStream(socket.getOutputStream())
+            var input = DataInputStream(socket.getInputStream())
+            var out = DataOutputStream(socket.getOutputStream())
 
             val magic = input.readInt()
             if (magic != TransferChunk.MAGIC) {
@@ -484,18 +514,34 @@ object TransferEngine {
                     status = TransferStatus.COMPLETED
                 )
                 return@withContext Result.success(record)
-            } else if (frameType != FrameType.MANIFEST.code) {
-                val err = NearsideError(NearsideErrorCode.PROTOCOL_INVALID_FRAME_TYPE, "handleInboundConnection", "Expected manifest or pair frame, got $frameType", correlationId = connectionId)
-                NearsideLogger.error(err, state = "failed")
-                return@withContext Result.failure(err)
+            }
+            if (frameType != SecureTransferChannel.CLIENT_HELLO || deviceIdentity == null) {
+                return@withContext Result.failure(secureFailure("Authenticated encrypted transfer required"))
+            }
+            val channel = SecureTransferChannel.server(input, out, deviceIdentity, trustStore)
+            input = channel.input
+            out = channel.output
+            if (input.readInt() != TransferChunk.MAGIC || input.readByte() != FrameType.MANIFEST.code) {
+                return@withContext Result.failure(secureFailure("Expected authenticated manifest"))
             }
 
             val len = input.readInt()
+            if (len !in 1..SecureTransferRecords.MAX_RECORD) throw secureFailure("Invalid manifest size")
             val manifestBytes = ByteArray(len)
             input.readFully(manifestBytes)
 
             val manifestObj = JSONObject(String(manifestBytes, Charsets.UTF_8))
             val manifest = TransferManifest.fromJson(manifestObj)
+            if (manifest.senderId != channel.peerIdentity) throw secureFailure("Manifest sender differs from authenticated peer")
+            if (manifest.itemCount != manifest.items.size || manifest.itemCount !in 1..1024 ||
+                manifest.items.map { it.name }.distinct().size != manifest.itemCount) throw secureFailure("Invalid manifest item count")
+            var declaredTotal = 0L
+            for ((index, item) in manifest.items.withIndex()) {
+                if (item.index != index || item.size < 0 || item.size > Long.MAX_VALUE - declaredTotal ||
+                    !item.sha256.matches(Regex("[0-9a-f]{64}"))) throw secureFailure("Invalid manifest item")
+                declaredTotal += item.size
+            }
+            if (declaredTotal != manifest.totalBytes) throw secureFailure("Invalid manifest total")
 
             NearsideLogger.info(
                 subsystem = "transfer",
@@ -550,50 +596,40 @@ object TransferEngine {
             val fileOutputs = mutableMapOf<Int, FileOutputStream>()
             val fileDigests = mutableMapOf<Int, MessageDigest>()
 
-            for (item in manifest.items) {
-                val destFile = File(destinationDir, item.name)
-                val digest = MessageDigest.getInstance("SHA-256")
-                fileDigests[item.index] = digest
-
-                if (destFile.exists() && destFile.length() > 0 && destFile.length() <= item.size) {
-                    val existingLen = destFile.length()
-                    // Pre-hash existing bytes on disk
-                    destFile.inputStream().use { fis ->
-                        val buf = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
-                        var readTotal = 0L
-                        while (readTotal < existingLen) {
-                            val toRead = Math.min(buf.size.toLong(), existingLen - readTotal).toInt()
-                            val r = fis.read(buf, 0, toRead)
-                            if (r <= 0) break
-                            digest.update(buf, 0, r)
-                            readTotal += r
-                        }
-                    }
-                    totalResumed += existingLen
-
-                    if (existingLen == item.size) {
-                        val cloneDigest = MessageDigest.getInstance("SHA-256")
-                        destFile.inputStream().use { fis ->
-                            val buf = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
-                            var r: Int
-                            while (fis.read(buf).also { r = it } != -1) {
-                                cloneDigest.update(buf, 0, r)
+            val receivedOffsets = mutableMapOf<Int, Long>()
+            var mayResumePrefix = true
+            try {
+                for (item in manifest.items) {
+                    val destFile = File(destinationDir, item.name)
+                    if (destFile.canonicalFile.parentFile != destinationDir.canonicalFile) throw secureFailure("Unsafe destination path")
+                    var digest = MessageDigest.getInstance("SHA-256")
+                    var resume = 0L
+                    if (mayResumePrefix && destFile.isFile && destFile.length() in 1..item.size) {
+                        val existingSize = destFile.length()
+                        destFile.inputStream().use { inputFile ->
+                            val buffer = ByteArray(TransferChunk.MAX_CHUNK_SIZE)
+                            var count = 0L
+                            while (count < existingSize) {
+                                val size = inputFile.read(buffer, 0, minOf(buffer.size.toLong(), existingSize - count).toInt())
+                                if (size <= 0) throw java.io.IOException("Resume file changed during read")
+                                digest.update(buffer, 0, size); count += size
                             }
                         }
-                        val calculatedHex = cloneDigest.digest().joinToString("") { "%02x".format(it) }
-                        if (calculatedHex == item.sha256) {
-                            // Completely finished
-                            continue
+                        resume = existingSize
+                        if (existingSize == item.size) {
+                            val actual = MessageDigest.getInstance("SHA-256").digest(destFile.readBytes()).joinToString("") { "%02x".format(it) }
+                            if (actual != item.sha256) { resume = 0; digest = MessageDigest.getInstance("SHA-256") }
                         }
                     }
-
-                    fileOutputs[item.index] = FileOutputStream(destFile, true)
-                } else {
-                    if (destFile.exists()) destFile.delete()
-                    destFile.parentFile?.mkdirs()
-                    destFile.createNewFile()
-                    fileOutputs[item.index] = FileOutputStream(destFile, false)
+                    fileOutputs[item.index] = FileOutputStream(destFile, resume > 0)
+                    fileDigests[item.index] = digest
+                    receivedOffsets[item.index] = resume
+                    totalResumed += resume
+                    mayResumePrefix = mayResumePrefix && resume == item.size
                 }
+            } catch (error: Exception) {
+                fileOutputs.values.forEach { try { it.close() } catch (_: Exception) {} }
+                throw error
             }
 
             // Send ACK
@@ -628,35 +664,6 @@ object TransferEngine {
                 timestamp = System.currentTimeMillis()
             )
 
-            if (totalResumed == manifest.totalBytes && manifest.totalBytes > 0) {
-                fileOutputs.values.forEach { try { it.close() } catch (ignored: Exception) {} }
-                val firstItem = manifest.items.firstOrNull()
-                val isText = firstItem?.mimeType == "text/plain"
-                val isUrl = firstItem?.mimeType == "text/uri-list"
-                var payloadText: String? = null
-                var payloadType = PayloadType.FILE
-
-                if (firstItem != null && (isText || isUrl)) {
-                    val receivedFile = File(destinationDir, firstItem.name)
-                    if (receivedFile.exists()) {
-                        try {
-                            payloadText = receivedFile.readText(Charsets.UTF_8)
-                            payloadType = if (isUrl) PayloadType.URL else PayloadType.TEXT
-                        } catch (ignored: Exception) {}
-                    }
-                }
-                record = record.copy(
-                    progress = 1.0f,
-                    speedBytesPerSec = 0.0,
-                    etaSeconds = 0L,
-                    status = TransferStatus.COMPLETED,
-                    payloadType = payloadType,
-                    payloadText = payloadText
-                )
-                onProgress(1.0f, record)
-                return@withContext Result.success(record)
-            }
-
             var totalReceived = totalResumed
             val totalBytes = manifest.totalBytes
             val startTime = System.currentTimeMillis()
@@ -676,11 +683,11 @@ object TransferEngine {
                     }
 
                     val chunkMagic = input.readInt()
-                    if (chunkMagic != TransferChunk.MAGIC) break
+                    if (chunkMagic != TransferChunk.MAGIC) throw secureFailure("Invalid encrypted chunk magic")
 
                     val cType = input.readByte()
                     if (cType == FrameType.COMPLETE.code) {
-                        input.readInt() // 0 length
+                        if (input.readInt() != 0) throw secureFailure("Invalid completion frame")
                         break
                     }
 
@@ -691,8 +698,12 @@ object TransferEngine {
                     }
 
                     val payloadLen = input.readInt()
+                    if (payloadLen !in 1..TransferChunk.MAX_CHUNK_SIZE) throw secureFailure("Invalid transfer chunk size")
                     val itemIndex = input.readInt()
                     val offset = input.readLong()
+                    val item = manifest.items.getOrNull(itemIndex) ?: throw secureFailure("Unknown transfer item")
+                    val expectedOffset = receivedOffsets[itemIndex] ?: throw secureFailure("Missing item offset")
+                    if (offset != expectedOffset || payloadLen.toLong() > item.size - expectedOffset) throw secureFailure("Invalid transfer chunk offset")
 
                     val payload = ByteArray(payloadLen)
                     input.readFully(payload)
@@ -709,7 +720,8 @@ object TransferEngine {
 
                     val fos = fileOutputs[itemIndex] ?: throw IllegalStateException("Unknown item index $itemIndex")
                     fos.write(payload)
-                    fileDigests[itemIndex]?.update(payload)
+                    fileDigests.getValue(itemIndex).update(payload)
+                    receivedOffsets[itemIndex] = expectedOffset + payloadLen
 
                     totalReceived += payloadLen
                     val frac = if (totalBytes > 0) totalReceived.toFloat() / totalBytes else 1.0f
@@ -728,9 +740,12 @@ object TransferEngine {
                     onProgress(frac, record)
                 }
 
-                // Verify full file SHA-256
+                fileOutputs.values.forEach { it.close() }
+                if (totalReceived != manifest.totalBytes) throw secureFailure("Incomplete transfer byte count")
+                // Verify every on-disk size and digest before acknowledging completion.
                 for (item in manifest.items) {
-                    val digest = fileDigests[item.index]?.digest() ?: continue
+                    if (receivedOffsets[item.index] != item.size || File(destinationDir, item.name).length() != item.size) throw secureFailure("Incomplete transfer item")
+                    val digest = fileDigests.getValue(item.index).digest()
                     val calculatedHex = digest.joinToString("") { "%02x".format(it) }
                     if (calculatedHex != item.sha256) {
                         val err = NearsideError(NearsideErrorCode.VERIFY_FILE_CHECKSUM_MISMATCH, "receiveInboundChunks", "File checksum mismatch for ${item.name}", correlationId = manifest.transferId)
@@ -763,6 +778,10 @@ object TransferEngine {
                     payloadType = payloadType,
                     payloadText = payloadText
                 )
+                val completeAck = TransferAck(manifest.transferId, "COMPLETED", manifest.items.map { it.index }, manifest.totalBytes, false)
+                val completeBytes = completeAck.toJson().toString().toByteArray(Charsets.UTF_8)
+                out.writeInt(TransferChunk.MAGIC); out.writeByte(FrameType.ACK.code.toInt()); out.writeInt(completeBytes.size)
+                out.write(completeBytes); out.flush()
                 onProgress(1.0f, record)
                 NearsideLogger.info(
                     subsystem = "transfer",

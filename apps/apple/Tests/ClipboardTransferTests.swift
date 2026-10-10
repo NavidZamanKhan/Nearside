@@ -98,13 +98,23 @@ struct ClipboardTransferTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let senderIdentity = DeviceIdentity()
-        let storeURL = tempDir.appendingPathComponent("test_trust_store.json")
-        let trustStore = PinnedTrustStore(customStorageURL: storeURL)
-        trustStore.enroll(
+        let receiverIdentity = DeviceIdentity()
+        let rxStoreURL = tempDir.appendingPathComponent("rx_trust_store.json")
+        let rxTrustStore = PinnedTrustStore(customStorageURL: rxStoreURL)
+        rxTrustStore.enroll(
             identity: senderIdentity.publicIdentity,
             name: "Loopback Sender",
             platform: "macos",
             publicKey: senderIdentity.publicKey
+        )
+
+        let txStoreURL = tempDir.appendingPathComponent("tx_trust_store.json")
+        let txTrustStore = PinnedTrustStore(customStorageURL: txStoreURL)
+        txTrustStore.enroll(
+            identity: receiverIdentity.publicIdentity,
+            name: "Loopback Receiver",
+            platform: "macos",
+            publicKey: receiverIdentity.publicKey
         )
 
         let port: UInt16 = 42561
@@ -120,10 +130,10 @@ struct ClipboardTransferTests {
         var receivedRecord: TransferRecord?
 
         listener.newConnectionHandler = { connection in
-            connection.start(queue: .global())
             TransferEngine.shared.handleInboundConnection(
                 connection: connection,
-                trustStore: trustStore,
+                trustStore: rxTrustStore,
+                deviceIdentity: receiverIdentity,
                 destinationFolder: tempDir,
                 onProgress: { _, _ in },
                 onComplete: { result in
@@ -140,9 +150,10 @@ struct ClipboardTransferTests {
         listener.start(queue: .global())
 
         let device = NearsideDevice(
+            id: receiverIdentity.publicIdentity,
             name: "Loopback Receiver",
             platform: .macOS,
-            fingerprint: "ns1_test_receiver",
+            fingerprint: receiverIdentity.publicIdentity,
             ipAddress: "127.0.0.1",
             port: port
         )
@@ -156,6 +167,8 @@ struct ClipboardTransferTests {
             isURL: false,
             to: device,
             senderId: senderIdentity.publicIdentity,
+            trustStore: txTrustStore,
+            deviceIdentity: senderIdentity,
             onProgress: { _, _, _ in },
             completion: { result in
                 switch result {
@@ -186,13 +199,23 @@ struct ClipboardTransferTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let senderIdentity = DeviceIdentity()
-        let storeURL = tempDir.appendingPathComponent("test_trust_store.json")
-        let trustStore = PinnedTrustStore(customStorageURL: storeURL)
-        trustStore.enroll(
+        let receiverIdentity = DeviceIdentity()
+        let rxStoreURL = tempDir.appendingPathComponent("rx_trust_store.json")
+        let rxTrustStore = PinnedTrustStore(customStorageURL: rxStoreURL)
+        rxTrustStore.enroll(
             identity: senderIdentity.publicIdentity,
             name: "Loopback Sender",
             platform: "macos",
             publicKey: senderIdentity.publicKey
+        )
+
+        let txStoreURL = tempDir.appendingPathComponent("tx_trust_store.json")
+        let txTrustStore = PinnedTrustStore(customStorageURL: txStoreURL)
+        txTrustStore.enroll(
+            identity: receiverIdentity.publicIdentity,
+            name: "Loopback Receiver",
+            platform: "macos",
+            publicKey: receiverIdentity.publicKey
         )
 
         let port: UInt16 = 42562
@@ -208,10 +231,10 @@ struct ClipboardTransferTests {
         var receivedRecord: TransferRecord?
 
         listener.newConnectionHandler = { connection in
-            connection.start(queue: .global())
             TransferEngine.shared.handleInboundConnection(
                 connection: connection,
-                trustStore: trustStore,
+                trustStore: rxTrustStore,
+                deviceIdentity: receiverIdentity,
                 destinationFolder: tempDir,
                 onProgress: { _, _ in },
                 onComplete: { result in
@@ -228,9 +251,10 @@ struct ClipboardTransferTests {
         listener.start(queue: .global())
 
         let device = NearsideDevice(
+            id: receiverIdentity.publicIdentity,
             name: "Loopback Receiver",
             platform: .macOS,
-            fingerprint: "ns1_test_receiver",
+            fingerprint: receiverIdentity.publicIdentity,
             ipAddress: "127.0.0.1",
             port: port
         )
@@ -244,6 +268,8 @@ struct ClipboardTransferTests {
             isURL: true,
             to: device,
             senderId: senderIdentity.publicIdentity,
+            trustStore: txTrustStore,
+            deviceIdentity: senderIdentity,
             onProgress: { _, _, _ in },
             completion: { result in
                 switch result {

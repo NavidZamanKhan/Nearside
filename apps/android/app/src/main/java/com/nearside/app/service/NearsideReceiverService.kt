@@ -169,7 +169,7 @@ class NearsideReceiverService : Service() {
                     message = "TCP ServerSocket bound to port 41433",
                     state = "listening"
                 )
-                val trustStore = PinnedTrustStore(this@NearsideReceiverService)
+                val trustStore = PinnedTrustStore.fromContext(this@NearsideReceiverService)
                 val deviceIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(this@NearsideReceiverService)
                 val destDir = (android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
                     ?: filesDir).apply { mkdirs() }

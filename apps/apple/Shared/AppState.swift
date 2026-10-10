@@ -95,6 +95,7 @@ public final class AppState: ObservableObject {
             TransferEngine.shared.handleInboundConnection(
                 connection: connection,
                 trustStore: self.trustStore,
+                deviceIdentity: self.deviceIdentity,
                 destinationFolder: self.downloadsFolderURL,
                 onProgress: { fraction, record in
                     Task { @MainActor in
@@ -348,6 +349,7 @@ public final class AppState: ObservableObject {
                 to: targetDevice,
                 senderId: deviceIdentity.publicIdentity,
                 trustStore: trustStore,
+                deviceIdentity: deviceIdentity,
                 onProgress: { [weak self] fraction, transferred, total in
                     Task { @MainActor in
                         let now = Date()
@@ -475,6 +477,7 @@ public final class AppState: ObservableObject {
                 to: device,
                 senderId: deviceIdentity.publicIdentity,
                 trustStore: trustStore,
+                deviceIdentity: deviceIdentity,
                 onProgress: { [weak self] fraction, transferred, total in
                     Task { @MainActor in
                         self?.activeTransfer?.progress = fraction

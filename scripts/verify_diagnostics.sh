@@ -28,6 +28,7 @@ xcrun swiftc -O \
     apps/apple/Shared/Crypto/ShortCodePakeProtocol.swift \
     apps/apple/Shared/Discovery/DiscoveryService.swift \
     apps/apple/Shared/Transfer/TransferProtocol.swift \
+    apps/apple/Shared/Transfer/SecureTransferChannel.swift \
     apps/apple/Shared/Transfer/TransferEngine.swift \
     apps/apple/Tests/DiagnosticTests.swift \
     -o /tmp/nearside_diagnostic_tests

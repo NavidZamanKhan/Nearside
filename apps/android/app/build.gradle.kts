@@ -3,6 +3,16 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Explicit local interoperability check; uses the unit-test runtime without an Android device.
+tasks.register<JavaExec>("crossPlatformTransferHarness") {
+    dependsOn("compileDebugUnitTestKotlin", "compileDebugUnitTestJavaWithJavac")
+    mainClass.set("com.nearside.app.transfer.CrossPlatformTransferHarness")
+    doFirst {
+        classpath = tasks.named<org.gradle.api.tasks.testing.Test>("testDebugUnitTest").get().classpath
+        args(providers.gradleProperty("interopDir").get())
+    }
+}
+
 android {
     namespace = "com.nearside.app"
     compileSdk = 36

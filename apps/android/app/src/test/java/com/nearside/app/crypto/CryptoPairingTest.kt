@@ -33,6 +33,7 @@ class CryptoPairingTest {
     fun testPinnedTrustStoreLifecycle() {
         val tempFile = Files.createTempFile("nearside_trust", ".json").toFile()
         tempFile.deleteOnExit()
+        assertTrue(tempFile.delete()) // A new store starts absent; an existing empty file is corrupt.
 
         val store = PinnedTrustStore(tempFile)
         val peerIdentity = DeviceIdentity.generateEphemeral()

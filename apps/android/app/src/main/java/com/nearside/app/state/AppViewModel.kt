@@ -47,7 +47,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val context: Context = application.applicationContext
     val deviceIdentity: DeviceIdentity = DeviceIdentity.loadOrCreateDefault(context)
-    val trustStore: PinnedTrustStore = PinnedTrustStore(context)
+    val trustStore: PinnedTrustStore = PinnedTrustStore.fromContext(context)
     val nsdDiscovery: NsdDiscoveryService = NsdDiscoveryService(context)
 
     private val _uiState = MutableStateFlow(
@@ -63,6 +63,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             loadEnrolledAndSeedData()
             startDiscoveryEngine()
+        }
+        viewModelScope.launch {
+            trustStore.changes.collect { loadEnrolledAndSeedData() }
         }
     }
 
@@ -83,7 +86,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 "linux" -> DevicePlatform.LINUX
                 else -> DevicePlatform.ANDROID
             }
-            NearsideDevice(
+            val paired = NearsideDevice(
                 id = record.identity,
                 name = record.name,
                 platform = platform,
@@ -92,12 +95,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 port = record.lastKnownPort,
                 reachability = DeviceReachability.ONLINE
             )
+            NsdDiscoveryService.findDiscoveredDevice(record.identity)?.let { live ->
+                paired.copy(ipAddress = live.ipAddress, port = live.port, reachability = live.reachability)
+            } ?: paired
         }
 
         _uiState.update {
             it.copy(
-                pairedDevices = pairedList,
-                recentTransfers = emptyList()
+                pairedDevices = pairedList
             )
         }
     }
@@ -255,6 +260,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 senderId = deviceIdentity.publicIdentity,
                 peerIdentity = device.fingerprint,
                 trustStore = trustStore,
+                deviceIdentity = deviceIdentity,
                     onProgress = { frac, _, _ -> },
                     onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                         _uiState.update { current ->
@@ -413,6 +419,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 senderId = deviceIdentity.publicIdentity,
                 peerIdentity = device.fingerprint,
                 trustStore = trustStore,
+                deviceIdentity = deviceIdentity,
                 onProgress = { frac, _, _ -> },
                 onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                     _uiState.update { current ->

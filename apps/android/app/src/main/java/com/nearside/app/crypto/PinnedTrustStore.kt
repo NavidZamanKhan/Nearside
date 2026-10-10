@@ -6,8 +6,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.PublicKey
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 data class TrustedPeerRecord(
     val identity: String,
@@ -27,10 +33,23 @@ sealed class TrustResult {
 }
 
 class PinnedTrustStore(private val storageFile: File? = null) {
+    companion object {
+        private val sharedStores = mutableMapOf<String, PinnedTrustStore>()
 
+        /** The UI and receiver must observe the same pins, blocks and enrollment. */
+        fun fromContext(context: Context): PinnedTrustStore = sharedForFile(
+            File(context.applicationContext.filesDir, "trust_store.json"))
+
+        @Synchronized internal fun sharedForFile(file: File): PinnedTrustStore =
+            sharedStores.getOrPut(file.canonicalPath) { PinnedTrustStore(file.canonicalFile) }
+    }
+
+    private var loadFailed = false
     private val enrolledKeys = ConcurrentHashMap<String, PublicKey>()
     private val peerMetadata = ConcurrentHashMap<String, TrustedPeerRecord>()
     private val blockedIdentities = ConcurrentHashMap.newKeySet<String>()
+    private val revision = MutableStateFlow(0L)
+    val changes = revision.asStateFlow()
 
     constructor(context: Context) : this(
         File(context.filesDir, "trust_store.json")
@@ -41,34 +60,41 @@ class PinnedTrustStore(private val storageFile: File? = null) {
     }
 
     fun enroll(
-        identity: String,
-        name: String,
-        platform: String,
-        publicKey: PublicKey,
-        lastKnownIp: String? = null,
-        lastKnownPort: Int? = null
+        identity: String, name: String, platform: String, publicKey: PublicKey,
+        lastKnownIp: String? = null, lastKnownPort: Int? = null
     ) {
-        val spkiBase64 = Base64.getEncoder().encodeToString(publicKey.encoded)
+        try { enrollVerifiedPeer(identity, name, platform, publicKey, lastKnownIp, lastKnownPort) }
+        catch (error: NearsideError) { NearsideLogger.error(error, state = "failed") }
+    }
+
+    /** QR pairing succeeds only after a validated pin is durably stored. */
+    @Synchronized fun enrollVerifiedPeer(
+        identity: String, name: String, platform: String, publicKey: PublicKey,
+        lastKnownIp: String? = null, lastKnownPort: Int? = null
+    ) {
+        if (DeviceIdentity.computeIdentity(publicKey.encoded) != identity) {
+            throw NearsideError(NearsideErrorCode.TRUST_KEY_MISMATCH, "enrollVerifiedPeer", "Peer identity does not match its public key")
+        }
+        val previousKey = enrolledKeys[identity]
+        val previousRecord = peerMetadata[identity]
         enrolledKeys[identity] = publicKey
-        peerMetadata[identity] = TrustedPeerRecord(
-            identity = identity,
-            name = name,
-            platformRaw = platform,
-            spkiBase64 = spkiBase64,
-            enrolledAtMillis = System.currentTimeMillis(),
-            lastKnownIp = lastKnownIp,
-            lastKnownPort = lastKnownPort
-        )
-        saveToDisk()
+        peerMetadata[identity] = TrustedPeerRecord(identity, name, platform,
+            Base64.getEncoder().encodeToString(publicKey.encoded), System.currentTimeMillis(), lastKnownIp, lastKnownPort)
+        try { saveToDisk() }
+        catch (error: NearsideError) {
+            if (previousKey == null) enrolledKeys.remove(identity) else enrolledKeys[identity] = previousKey
+            if (previousRecord == null) peerMetadata.remove(identity) else peerMetadata[identity] = previousRecord
+            throw error
+        }
+        revision.value += 1
         NearsideLogger.info("trust", "enroll", "Enrolled trusted peer", metadata = mapOf(
-            "peer" to NearsideRedactor.sanitizeIdentity(identity),
-            "name" to name,
-            "platform" to platform
+            "peer" to NearsideRedactor.sanitizeIdentity(identity), "platform" to platform
         ))
     }
 
-    fun updatePeerEndpoint(identity: String, ip: String?, port: Int?) {
-        val record = peerMetadata[identity] ?: return
+    @Synchronized fun updatePeerEndpoint(identity: String, ip: String?, port: Int?) {
+        val previous = peerMetadata[identity] ?: return
+        val record = previous.copy()
         var changed = false
         if (!ip.isNullOrBlank() && record.lastKnownIp != ip) {
             record.lastKnownIp = ip
@@ -79,33 +105,44 @@ class PinnedTrustStore(private val storageFile: File? = null) {
             changed = true
         }
         if (changed) {
-            saveToDisk()
+            peerMetadata[identity] = record
+            try { saveToDisk() }
+            catch (error: NearsideError) {
+                peerMetadata[identity] = previous
+                NearsideLogger.error(error, state = "failed")
+                return
+            }
+            revision.value += 1
         }
     }
 
-    fun block(identity: String) {
+    @Synchronized fun block(identity: String) {
         blockedIdentities.add(identity)
-        saveToDisk()
+        try { saveToDisk() }
+        catch (error: NearsideError) { NearsideLogger.error(error, state = "failed") }
+        revision.value += 1
         NearsideLogger.info("trust", "block", "Blocked peer identity", metadata = mapOf("peer" to NearsideRedactor.sanitizeIdentity(identity)))
     }
 
-    fun unpair(identity: String) {
+    @Synchronized fun unpair(identity: String) {
         enrolledKeys.remove(identity)
         peerMetadata.remove(identity)
         blockedIdentities.remove(identity)
-        saveToDisk()
+        try { saveToDisk() }
+        catch (error: NearsideError) { NearsideLogger.error(error, state = "failed") }
+        revision.value += 1
         NearsideLogger.info("trust", "unpair", "Unpaired peer", metadata = mapOf("peer" to NearsideRedactor.sanitizeIdentity(identity)))
     }
 
-    fun isEnrolled(identity: String): Boolean = enrolledKeys.containsKey(identity)
+    @Synchronized fun isEnrolled(identity: String): Boolean = enrolledKeys.containsKey(identity)
 
-    fun isBlocked(identity: String): Boolean = blockedIdentities.contains(identity)
+    @Synchronized fun isBlocked(identity: String): Boolean = blockedIdentities.contains(identity)
 
-    fun canTransfer(identity: String): Boolean = isEnrolled(identity) && !isBlocked(identity)
+    @Synchronized fun canTransfer(identity: String): Boolean = !loadFailed && isEnrolled(identity) && !isBlocked(identity)
 
-    fun allEnrolledPeers(): List<TrustedPeerRecord> = peerMetadata.values.toList()
+    @Synchronized fun allEnrolledPeers(): List<TrustedPeerRecord> = peerMetadata.values.map { it.copy() }
 
-    fun validatePeer(presentedSpki: ByteArray): TrustResult {
+    @Synchronized fun validatePeer(presentedSpki: ByteArray): TrustResult {
         val identity = DeviceIdentity.computeIdentity(presentedSpki)
 
         if (blockedIdentities.contains(identity)) {
@@ -138,87 +175,79 @@ class PinnedTrustStore(private val storageFile: File? = null) {
         return TrustResult.Success(identity)
     }
 
-    private fun saveToDisk() {
+    @Synchronized private fun saveToDisk() {
         val file = storageFile ?: return
+        if (loadFailed) throw NearsideError(NearsideErrorCode.TRUST_STORAGE_FAILED, "saveTrustStore",
+            "Trust storage could not be read. Existing data was preserved; restore it before pairing")
+        val tempFile = File(file.parentFile, "${file.name}.${UUID.randomUUID()}.tmp")
         try {
             val array = JSONArray()
             for (record in peerMetadata.values) {
-                val obj = JSONObject().apply {
-                    put("identity", record.identity)
-                    put("name", record.name)
-                    put("platformRaw", record.platformRaw)
-                    put("spkiBase64", record.spkiBase64)
-                    put("enrolledAtMillis", record.enrolledAtMillis)
-                    if (record.lastKnownIp != null) {
-                        put("lastKnownIp", record.lastKnownIp)
-                    }
-                    if (record.lastKnownPort != null) {
-                        put("lastKnownPort", record.lastKnownPort)
-                    }
-                }
-                array.put(obj)
+                array.put(JSONObject().apply {
+                    put("identity", record.identity); put("name", record.name); put("platformRaw", record.platformRaw)
+                    put("spkiBase64", record.spkiBase64); put("enrolledAtMillis", record.enrolledAtMillis)
+                    record.lastKnownIp?.let { put("lastKnownIp", it) }
+                    record.lastKnownPort?.let { put("lastKnownPort", it) }
+                })
             }
-            val blockedArray = JSONArray(blockedIdentities.toList())
             val root = JSONObject().apply {
-                put("records", array)
-                put("blocked", blockedArray)
+                put("records", array); put("blocked", JSONArray(blockedIdentities.toList()))
             }
-
-            val tempFile = File(file.parentFile, "${file.name}.tmp")
-            tempFile.writeText(root.toString(2), Charsets.UTF_8)
-            if (file.exists()) {
-                file.delete()
+            FileOutputStream(tempFile).use { output ->
+                output.write(root.toString().toByteArray(Charsets.UTF_8))
+                output.fd.sync()
             }
-            tempFile.renameTo(file)
-        } catch (e: Exception) {
-            // Ignore write errors in test or restricted environments
-        }
+            // Same-directory atomic replacement never deletes the old store first.
+            Files.move(tempFile.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (error: Exception) {
+            throw storageFailure("saveTrustStore", error)
+        } finally { tempFile.delete() }
     }
 
-    private fun loadFromDisk() {
+    @Synchronized private fun loadFromDisk() {
         val file = storageFile ?: return
         if (!file.exists()) return
-
         try {
-            val jsonText = file.readText(Charsets.UTF_8)
-            val root = JSONObject(jsonText)
-            val records = root.optJSONArray("records") ?: JSONArray()
+            val root = JSONObject(file.readText(Charsets.UTF_8))
+            val records = root.getJSONArray("records")
+            val blocked = if (root.has("blocked")) root.getJSONArray("blocked") else JSONArray()
+            val keys = mutableMapOf<String, PublicKey>()
+            val metadata = mutableMapOf<String, TrustedPeerRecord>()
+            val blocks = mutableSetOf<String>()
             for (i in 0 until records.length()) {
                 val obj = records.getJSONObject(i)
                 val identity = obj.getString("identity")
-                val name = obj.getString("name")
-                val platformRaw = obj.getString("platformRaw")
                 val spkiBase64 = obj.getString("spkiBase64")
-                val enrolledAtMillis = obj.optLong("enrolledAtMillis", System.currentTimeMillis())
-
-                if (name == "Loopback Sender" || identity.contains("test")) {
-                    continue
+                val spki = Base64.getDecoder().decode(spkiBase64)
+                val publicKey = DeviceIdentity.decodePublicKey(spki)
+                if (DeviceIdentity.computeIdentity(spki) != identity || keys.containsKey(identity)) {
+                    throw NearsideError(NearsideErrorCode.TRUST_STORAGE_FAILED, "loadTrustStore",
+                        "Trust storage contains an invalid peer record. Existing data was preserved")
                 }
-
-                val spkiBytes = Base64.getDecoder().decode(spkiBase64)
-                val publicKey = DeviceIdentity.decodePublicKey(spkiBytes)
-
-                val lastKnownIp = if (obj.has("lastKnownIp")) obj.optString("lastKnownIp").takeIf { it.isNotEmpty() } else null
-                val lastKnownPort = if (obj.has("lastKnownPort")) obj.optInt("lastKnownPort").takeIf { it > 0 } else null
-
-                enrolledKeys[identity] = publicKey
-                peerMetadata[identity] = TrustedPeerRecord(
-                    identity = identity,
-                    name = name,
-                    platformRaw = platformRaw,
-                    spkiBase64 = spkiBase64,
-                    enrolledAtMillis = enrolledAtMillis,
-                    lastKnownIp = lastKnownIp,
-                    lastKnownPort = lastKnownPort
-                )
+                keys[identity] = publicKey
+                metadata[identity] = TrustedPeerRecord(identity, obj.getString("name"), obj.getString("platformRaw"),
+                    spkiBase64, obj.getLong("enrolledAtMillis"),
+                    if (obj.has("lastKnownIp")) obj.getString("lastKnownIp").takeIf { it.isNotEmpty() } else null,
+                    if (obj.has("lastKnownPort")) obj.getInt("lastKnownPort").takeIf { it in 1..65535 } else null)
             }
-
-            val blocked = root.optJSONArray("blocked") ?: JSONArray()
-            for (i in 0 until blocked.length()) {
-                blockedIdentities.add(blocked.getString(i))
-            }
-        } catch (e: Exception) {
-            // Malformed data will be cleanly overwritten on next save
+            for (i in 0 until blocked.length()) blocks.add(blocked.getString(i))
+            enrolledKeys.putAll(keys)
+            peerMetadata.putAll(metadata)
+            blockedIdentities.addAll(blocks)
+        } catch (error: Exception) {
+            loadFailed = true
+            NearsideLogger.error((error as? NearsideError) ?: storageFailure("loadTrustStore", error), state = "failed")
         }
+    }
+
+    private fun storageFailure(operation: String, error: Exception): NearsideError {
+        // Native type/classification is useful; native messages may contain a
+        // private path, JSON payload or key data and must not enter diagnostics.
+        val nativeErrno = generateSequence<Throwable>(error) { it.cause }
+            .filterIsInstance<android.system.ErrnoException>().firstOrNull()?.errno
+        val classification = error.javaClass.name + (nativeErrno?.let { " errno=$it" } ?: "")
+        return NearsideError(NearsideErrorCode.TRUST_STORAGE_FAILED, operation,
+            "Trust storage is unavailable. Check local storage access and retry; existing data was preserved",
+            underlyingError = Exception(classification))
     }
 }

@@ -36,7 +36,9 @@ public struct TrustedPeerRecord: Codable {
     }
 }
 
-public final class PinnedTrustStore {
+public final class PinnedTrustStore: @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private var loadFailed = false
     private struct Snapshot: Codable {
         let records: [TrustedPeerRecord]
         let blocked: Set<String>
@@ -52,39 +54,56 @@ public final class PinnedTrustStore {
         } else {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let dir = appSupport.appendingPathComponent("com.nearside.app")
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             self.storageURL = dir.appendingPathComponent("trust_store.json")
+            do { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+            catch {
+                loadFailed = true
+                NearsideLogger.shared.error(storageFailure(operation: "createTrustDirectory", cause: error), state: "failed")
+            }
         }
         loadFromDisk()
     }
 
     public func enroll(
-        identity: String,
-        name: String,
-        platform: String,
-        publicKey: P256.Signing.PublicKey,
-        lastKnownIp: String? = nil,
-        lastKnownPort: UInt16? = nil
+        identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey,
+        lastKnownIp: String? = nil, lastKnownPort: UInt16? = nil
     ) {
+        do { try enrollVerifiedPeer(identity: identity, name: name, platform: platform, publicKey: publicKey,
+            lastKnownIp: lastKnownIp, lastKnownPort: lastKnownPort) }
+        catch {
+            NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "enroll", cause: error), state: "failed")
+        }
+    }
+
+    /// Pairing uses this transactional API: success requires durable pin storage.
+    public func enrollVerifiedPeer(
+        identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey,
+        lastKnownIp: String? = nil, lastKnownPort: UInt16? = nil
+    ) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard DeviceIdentity.computeIdentity(fromSpki: publicKey.derRepresentation) == identity else {
+            throw NearsideError(code: .trustKeyMismatch, operation: "enrollVerifiedPeer",
+                message: "Peer identity does not match its public key.")
+        }
+        let previousKey = enrolledKeys[identity]
+        let previousRecord = peerMetadata[identity]
         enrolledKeys[identity] = publicKey
-        peerMetadata[identity] = TrustedPeerRecord(
-            identity: identity,
-            name: name,
-            platformRaw: platform,
-            spkiBase64: publicKey.derRepresentation.base64EncodedString(),
-            enrolledAt: Date(),
-            lastKnownIp: lastKnownIp,
-            lastKnownPort: lastKnownPort
-        )
-        saveToDisk()
+        peerMetadata[identity] = TrustedPeerRecord(identity: identity, name: name, platformRaw: platform,
+            spkiBase64: publicKey.derRepresentation.base64EncodedString(), enrolledAt: Date(),
+            lastKnownIp: lastKnownIp, lastKnownPort: lastKnownPort)
+        do { try saveToDisk() }
+        catch {
+            enrolledKeys[identity] = previousKey
+            peerMetadata[identity] = previousRecord
+            throw error
+        }
         NearsideLogger.shared.info("trust", "enroll", "Enrolled trusted peer", metadata: [
-            "peer": NearsideRedactor.sanitizeIdentity(identity),
-            "name": name,
-            "platform": platform
+            "peer": NearsideRedactor.sanitizeIdentity(identity), "platform": platform
         ])
     }
 
     public func updatePeerEndpoint(identity: String, ip: String?, port: UInt16?) {
+        lock.lock(); defer { lock.unlock() }
         guard var record = peerMetadata[identity] else { return }
         var changed = false
         if let ip = ip, !ip.isEmpty, record.lastKnownIp != ip {
@@ -96,42 +115,56 @@ public final class PinnedTrustStore {
             changed = true
         }
         if changed {
+            let previous = peerMetadata[identity]
             peerMetadata[identity] = record
-            saveToDisk()
+            do { try saveToDisk() }
+            catch {
+                peerMetadata[identity] = previous
+                NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "updatePeerEndpoint", cause: error), state: "failed")
+            }
         }
     }
 
     public func block(identity: String) {
+        lock.lock(); defer { lock.unlock() }
         blockedIdentities.insert(identity)
-        saveToDisk()
+        do { try saveToDisk() }
+        catch { NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "saveTrustStore", cause: error), state: "failed") }
         NearsideLogger.shared.info("trust", "block", "Blocked peer identity", metadata: ["peer": NearsideRedactor.sanitizeIdentity(identity)])
     }
 
     public func unpair(identity: String) {
+        lock.lock(); defer { lock.unlock() }
         enrolledKeys.removeValue(forKey: identity)
         peerMetadata.removeValue(forKey: identity)
         blockedIdentities.remove(identity)
-        saveToDisk()
+        do { try saveToDisk() }
+        catch { NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "saveTrustStore", cause: error), state: "failed") }
         NearsideLogger.shared.info("trust", "unpair", "Unpaired peer", metadata: ["peer": NearsideRedactor.sanitizeIdentity(identity)])
     }
 
     public func isEnrolled(identity: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
         return enrolledKeys[identity] != nil
     }
 
     public func isBlocked(identity: String) -> Bool {
-        blockedIdentities.contains(identity)
+        lock.lock(); defer { lock.unlock() }
+        return blockedIdentities.contains(identity)
     }
 
     public func canTransfer(identity: String) -> Bool {
-        isEnrolled(identity: identity) && !isBlocked(identity: identity)
+        lock.lock(); defer { lock.unlock() }
+        return !loadFailed && isEnrolled(identity: identity) && !isBlocked(identity: identity)
     }
 
     public func allEnrolledPeers() -> [TrustedPeerRecord] {
+        lock.lock(); defer { lock.unlock() }
         return Array(peerMetadata.values)
     }
 
     public func validatePeer(presentedSpki: Data) -> Result<String, TrustError> {
+        lock.lock(); defer { lock.unlock() }
         let identity = DeviceIdentity.computeIdentity(fromSpki: presentedSpki)
 
         if blockedIdentities.contains(identity) {
@@ -163,34 +196,66 @@ public final class PinnedTrustStore {
         return .success(identity)
     }
 
-    private func saveToDisk() {
-        let records = Array(peerMetadata.values)
-        if let data = try? JSONEncoder().encode(Snapshot(records: records, blocked: blockedIdentities)) {
-            try? data.write(to: storageURL, options: .atomic)
+    private func saveToDisk() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !loadFailed else {
+            throw NearsideError(code: .trustStorageFailed, operation: "saveTrustStore",
+                message: "Trust storage could not be read. Existing data was preserved; restore it before pairing.")
         }
+        do {
+            let snapshot = Snapshot(records: Array(peerMetadata.values), blocked: blockedIdentities)
+            try JSONEncoder().encode(snapshot).write(to: storageURL, options: .atomic)
+        } catch { throw storageFailure(operation: "saveTrustStore", cause: error) }
     }
 
     private func loadFromDisk() {
-        guard let data = try? Data(contentsOf: storageURL) else {
+        lock.lock(); defer { lock.unlock() }
+        guard !loadFailed else { return }
+        let data: Data
+        do { data = try Data(contentsOf: storageURL) }
+        catch {
+            let native = error as NSError
+            if native.domain == NSCocoaErrorDomain && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(native.code) { return }
+            loadFailed = true
+            NearsideLogger.shared.error(storageFailure(operation: "loadTrustStore", cause: error), state: "failed")
             return
         }
-        let records: [TrustedPeerRecord]
-        if let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
-            records = snapshot.records
-            blockedIdentities = snapshot.blocked
-        } else if let legacy = try? JSONDecoder().decode([TrustedPeerRecord].self, from: data) {
-            records = legacy
-        } else { return }
-
-        for record in records {
-            if record.name == "Loopback Sender" || record.identity.contains("test") {
-                continue
+        do {
+            let records: [TrustedPeerRecord]
+            let blocked: Set<String>
+            if let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
+                records = snapshot.records
+                blocked = snapshot.blocked
+            } else {
+                records = try JSONDecoder().decode([TrustedPeerRecord].self, from: data)
+                blocked = []
             }
-            if let spkiData = Data(base64Encoded: record.spkiBase64),
-               let pubKey = try? P256.Signing.PublicKey(derRepresentation: spkiData) {
-                enrolledKeys[record.identity] = pubKey
-                peerMetadata[record.identity] = record
+            var keys: [String: P256.Signing.PublicKey] = [:]
+            var metadata: [String: TrustedPeerRecord] = [:]
+            for record in records {
+                guard let spki = Data(base64Encoded: record.spkiBase64),
+                      let key = try? P256.Signing.PublicKey(derRepresentation: spki),
+                      DeviceIdentity.computeIdentity(fromSpki: spki) == record.identity,
+                      keys[record.identity] == nil else {
+                    throw NearsideError(code: .trustStorageFailed, operation: "loadTrustStore",
+                        message: "Trust storage contains an invalid peer record. Existing data was preserved.")
+                }
+                keys[record.identity] = key
+                metadata[record.identity] = record
             }
+            enrolledKeys = keys
+            peerMetadata = metadata
+            blockedIdentities = blocked
+        } catch {
+            loadFailed = true
+            NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "loadTrustStore", cause: error), state: "failed")
         }
+    }
+
+    private func storageFailure(operation: String, cause: Error) -> NearsideError {
+        let native = cause as NSError
+        return NearsideError(code: .trustStorageFailed, operation: operation,
+            message: "Trust storage is unavailable. Check local storage access and retry; existing data was preserved.",
+            underlyingError: NSError(domain: native.domain, code: native.code))
     }
 }

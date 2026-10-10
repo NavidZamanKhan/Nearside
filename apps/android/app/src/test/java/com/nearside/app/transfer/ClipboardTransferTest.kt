@@ -78,8 +78,11 @@ class ClipboardTransferTest {
     fun testEndToEndTextTransfer() {
         runBlocking {
             val tempDir = Files.createTempDirectory("nearside_rx_text_test").toFile()
-            val trustStoreFile = Files.createTempFile("nearside_trust_text", ".json").toFile()
+            val trustStoreFile = Files.createTempFile("nearside_trust_text", ".json").toFile().apply { delete() }
             val senderIdentity = DeviceIdentity.generateEphemeral()
+            val receiverIdentity = DeviceIdentity.generateEphemeral()
+            val senderTrust = PinnedTrustStore()
+            senderTrust.enroll(receiverIdentity.publicIdentity, "Receiver", "macos", receiverIdentity.publicKey)
             val receiverTrustStore = PinnedTrustStore(trustStoreFile)
             receiverTrustStore.enroll(
                 identity = senderIdentity.publicIdentity,
@@ -99,6 +102,7 @@ class ClipboardTransferTest {
                 val rxResult = TransferEngine.handleInboundConnection(
                     socket = client,
                     trustStore = receiverTrustStore,
+                    deviceIdentity = receiverIdentity,
                     destinationDir = tempDir,
                     onProgress = { _, _ -> }
                 )
@@ -112,6 +116,9 @@ class ClipboardTransferTest {
                 host = "127.0.0.1",
                 port = port,
                 senderId = senderIdentity.publicIdentity,
+                deviceIdentity = senderIdentity,
+                peerIdentity = receiverIdentity.publicIdentity,
+                trustStore = senderTrust,
                 onProgress = { _, _, _ -> }
             )
 
@@ -133,8 +140,11 @@ class ClipboardTransferTest {
     fun testEndToEndUrlTransfer() {
         runBlocking {
             val tempDir = Files.createTempDirectory("nearside_rx_url_test").toFile()
-            val trustStoreFile = Files.createTempFile("nearside_trust_url", ".json").toFile()
+            val trustStoreFile = Files.createTempFile("nearside_trust_url", ".json").toFile().apply { delete() }
             val senderIdentity = DeviceIdentity.generateEphemeral()
+            val receiverIdentity = DeviceIdentity.generateEphemeral()
+            val senderTrust = PinnedTrustStore()
+            senderTrust.enroll(receiverIdentity.publicIdentity, "Receiver", "macos", receiverIdentity.publicKey)
             val receiverTrustStore = PinnedTrustStore(trustStoreFile)
             receiverTrustStore.enroll(
                 identity = senderIdentity.publicIdentity,
@@ -154,6 +164,7 @@ class ClipboardTransferTest {
                 val rxResult = TransferEngine.handleInboundConnection(
                     socket = client,
                     trustStore = receiverTrustStore,
+                    deviceIdentity = receiverIdentity,
                     destinationDir = tempDir,
                     onProgress = { _, _ -> }
                 )
@@ -167,6 +178,9 @@ class ClipboardTransferTest {
                 host = "127.0.0.1",
                 port = port,
                 senderId = senderIdentity.publicIdentity,
+                deviceIdentity = senderIdentity,
+                peerIdentity = receiverIdentity.publicIdentity,
+                trustStore = senderTrust,
                 onProgress = { _, _, _ -> }
             )
 

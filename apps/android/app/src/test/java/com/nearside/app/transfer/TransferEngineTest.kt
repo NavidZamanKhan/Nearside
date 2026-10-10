@@ -122,11 +122,14 @@ class TransferEngineTest {
     @Test
     fun testPathTraversalRejection() = runBlocking {
         val destDir = Files.createTempDirectory("nearside_sec_dst").toFile()
-        val trustStoreFile = Files.createTempFile("nearside_sec_trust", ".json").toFile()
+        val trustStoreFile = Files.createTempFile("nearside_sec_trust", ".json").toFile().apply { delete() }
         destDir.deleteOnExit()
         trustStoreFile.deleteOnExit()
 
         val senderIdentity = DeviceIdentity.generateEphemeral()
+        val receiverIdentity = DeviceIdentity.generateEphemeral()
+        val senderTrust = PinnedTrustStore()
+        senderTrust.enroll(receiverIdentity.publicIdentity, "Receiver", "macos", receiverIdentity.publicKey)
         val trustStore = PinnedTrustStore(trustStoreFile)
         trustStore.enroll(senderIdentity.publicIdentity, "Sec Sender", "android", senderIdentity.publicKey)
 
@@ -139,6 +142,7 @@ class TransferEngineTest {
             serverResult = TransferEngine.handleInboundConnection(
                 socket = client,
                 trustStore = trustStore,
+                deviceIdentity = receiverIdentity,
                 destinationDir = destDir,
                 onProgress = { _, _ -> }
             )
@@ -148,10 +152,12 @@ class TransferEngineTest {
 
         // Malicious client sending path traversal in item name
         val clientSocket = Socket("127.0.0.1", port)
-        val out = DataOutputStream(clientSocket.getOutputStream())
-        val input = DataInputStream(clientSocket.getInputStream())
+        val secure = SecureTransferChannel.client(DataInputStream(clientSocket.getInputStream()),
+            DataOutputStream(clientSocket.getOutputStream()), senderIdentity, receiverIdentity.publicIdentity, senderTrust)
+        val out = secure.output
+        val input = secure.input
 
-        val badItem = TransferItemManifest(0, "../../malicious.sh", "application/x-sh", 100, "abc")
+        val badItem = TransferItemManifest(0, "../../malicious.sh", "application/x-sh", 100, "0".repeat(64))
         val manifest = TransferManifest("tx_bad", senderIdentity.publicIdentity, 100, 1, listOf(badItem))
         val manBytes = manifest.toJson().toString().toByteArray(Charsets.UTF_8)
 
@@ -187,12 +193,15 @@ class TransferEngineTest {
     fun testLoopbackSocketTransfer() = runBlocking {
         val tempDir = Files.createTempDirectory("nearside_tx_src").toFile()
         val destDir = Files.createTempDirectory("nearside_tx_dst").toFile()
-        val trustStoreFile = Files.createTempFile("nearside_trust", ".json").toFile()
+        val trustStoreFile = Files.createTempFile("nearside_trust", ".json").toFile().apply { delete() }
         tempDir.deleteOnExit()
         destDir.deleteOnExit()
         trustStoreFile.deleteOnExit()
 
         val senderIdentity = DeviceIdentity.generateEphemeral()
+        val receiverIdentity = DeviceIdentity.generateEphemeral()
+        val senderTrust = PinnedTrustStore()
+        senderTrust.enroll(receiverIdentity.publicIdentity, "Receiver", "macos", receiverIdentity.publicKey)
         val trustStore = PinnedTrustStore(trustStoreFile)
         trustStore.enroll(senderIdentity.publicIdentity, "Android Sender", "android", senderIdentity.publicKey)
 
@@ -210,6 +219,7 @@ class TransferEngineTest {
             serverResult = TransferEngine.handleInboundConnection(
                 socket = client,
                 trustStore = trustStore,
+                deviceIdentity = receiverIdentity,
                 destinationDir = destDir,
                 onProgress = { _, _ -> }
             )
@@ -223,6 +233,9 @@ class TransferEngineTest {
             host = "127.0.0.1",
             port = port,
             senderId = senderIdentity.publicIdentity,
+            deviceIdentity = senderIdentity,
+            peerIdentity = receiverIdentity.publicIdentity,
+            trustStore = senderTrust,
             onProgress = { _, _, _ -> }
         )
 
@@ -242,12 +255,15 @@ class TransferEngineTest {
     fun testInterruptionAndResumeTransfer() = runBlocking {
         val tempDir = Files.createTempDirectory("nearside_resume_src").toFile()
         val destDir = Files.createTempDirectory("nearside_resume_dst").toFile()
-        val trustStoreFile = Files.createTempFile("nearside_resume_trust", ".json").toFile()
+        val trustStoreFile = Files.createTempFile("nearside_resume_trust", ".json").toFile().apply { delete() }
         tempDir.deleteOnExit()
         destDir.deleteOnExit()
         trustStoreFile.deleteOnExit()
 
         val senderIdentity = DeviceIdentity.generateEphemeral()
+        val receiverIdentity = DeviceIdentity.generateEphemeral()
+        val senderTrust = PinnedTrustStore()
+        senderTrust.enroll(receiverIdentity.publicIdentity, "Receiver", "macos", receiverIdentity.publicKey)
         val trustStore = PinnedTrustStore(trustStoreFile)
         trustStore.enroll(senderIdentity.publicIdentity, "Resume Sender", "android", senderIdentity.publicKey)
 
@@ -272,6 +288,7 @@ class TransferEngineTest {
             serverResult = TransferEngine.handleInboundConnection(
                 socket = client,
                 trustStore = trustStore,
+                deviceIdentity = receiverIdentity,
                 destinationDir = destDir,
                 onProgress = { _, _ -> }
             )
@@ -286,6 +303,9 @@ class TransferEngineTest {
             host = "127.0.0.1",
             port = port,
             senderId = senderIdentity.publicIdentity,
+            deviceIdentity = senderIdentity,
+            peerIdentity = receiverIdentity.publicIdentity,
+            trustStore = senderTrust,
             onProgress = { _, current, _ ->
                 if (reportedStartBytes == -1L) {
                     reportedStartBytes = current

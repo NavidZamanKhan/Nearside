@@ -1,6 +1,8 @@
 package com.nearside.app.crypto
 
 import android.content.Context
+import com.nearside.app.diagnostics.NearsideError
+import com.nearside.app.diagnostics.NearsideErrorCode
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyFactory
@@ -44,36 +46,37 @@ class DeviceIdentity(
             return DeviceIdentity(pair.private, pair.public)
         }
 
-        fun loadOrCreateDefault(context: Context? = null): DeviceIdentity {
-            if (context != null) {
-                try {
-                    val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-                    if (keyStore.containsAlias(ALIAS_IDENTITY)) {
-                        val entry = keyStore.getEntry(ALIAS_IDENTITY, null) as? KeyStore.PrivateKeyEntry
-                        if (entry != null) {
-                            return DeviceIdentity(entry.privateKey, entry.certificate.publicKey)
-                        }
-                    }
+        @Synchronized fun loadOrCreateDefault(context: Context): DeviceIdentity {
+            // Keep creation inside AndroidKeyStore; denied or failed key access must never
+            // replace an enrolled identity with an unrelated ephemeral signing key.
+            return loadPersistentIdentity(readKey = {
+                val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
+                keyStore.load(null)
+                if (keyStore.containsAlias(ALIAS_IDENTITY)) {
+                    val entry = keyStore.getEntry(ALIAS_IDENTITY, null) as? KeyStore.PrivateKeyEntry
+                        ?: throw IllegalStateException("Stored device key is invalid")
+                    DeviceIdentity(entry.privateKey, entry.certificate.publicKey)
+                } else null
+            }, createKey = {
+                val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
+                val spec = KeyGenParameterSpec.Builder(ALIAS_IDENTITY,
+                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .build()
+                kpg.initialize(spec)
+                val pair = kpg.generateKeyPair()
+                DeviceIdentity(pair.private, pair.public)
+            })
+        }
 
-                    val kpg = KeyPairGenerator.getInstance(
-                        KeyProperties.KEY_ALGORITHM_EC,
-                        ANDROID_KEYSTORE
-                    )
-                    val spec = KeyGenParameterSpec.Builder(
-                        ALIAS_IDENTITY,
-                        KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-                    )
-                        .setDigests(KeyProperties.DIGEST_SHA256)
-                        .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                        .build()
-                    kpg.initialize(spec)
-                    val pair = kpg.generateKeyPair()
-                    return DeviceIdentity(pair.private, pair.public)
-                } catch (e: Exception) {
-                    // Fall back to memory/file based key if AndroidKeyStore is unavailable
-                }
+        internal fun loadPersistentIdentity(readKey: () -> DeviceIdentity?, createKey: () -> DeviceIdentity): DeviceIdentity {
+            return try { readKey() ?: createKey() }
+            catch (error: Exception) {
+                throw NearsideError(NearsideErrorCode.TRUST_STORAGE_FAILED, "loadDeviceIdentity",
+                    "Cannot access the persistent device identity. Unlock the device and restart Nearside.",
+                    underlyingError = error)
             }
-            return generateEphemeral()
         }
 
         fun verify(signature: ByteArray, data: ByteArray, publicKey: PublicKey): Boolean {

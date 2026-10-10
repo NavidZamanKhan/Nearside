@@ -148,6 +148,7 @@ public final class TransferEngine: @unchecked Sendable {
         senderId: String,
         retryPolicy: RetryPolicy = .default,
         trustStore: PinnedTrustStore? = nil,
+        deviceIdentity: DeviceIdentity? = nil,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         completion: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
@@ -169,6 +170,7 @@ public final class TransferEngine: @unchecked Sendable {
             senderId: senderId,
             retryPolicy: retryPolicy,
             trustStore: trustStore,
+            deviceIdentity: deviceIdentity,
             onProgress: onProgress,
             completion: { result in
                 try? FileManager.default.removeItem(at: tempDir)
@@ -237,13 +239,25 @@ public final class TransferEngine: @unchecked Sendable {
         senderId: String,
         retryPolicy: RetryPolicy = .default,
         trustStore: PinnedTrustStore? = nil,
+        deviceIdentity: DeviceIdentity? = nil,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         completion: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
         queue.async { [weak self] in
             guard let self = self else { return }
 
-            if let trustStore = trustStore, !trustStore.canTransfer(identity: device.fingerprint) {
+            guard let trustStore = trustStore else {
+                completion(.failure(secureTransferFailure("Paired recipient trust store is required")))
+                return
+            }
+            let localIdentity: DeviceIdentity
+            do { localIdentity = try deviceIdentity ?? DeviceIdentity.loadOrCreatePersistent() }
+            catch { completion(.failure(error)); return }
+            guard senderId == localIdentity.publicIdentity else {
+                completion(.failure(secureTransferFailure("Manifest sender differs from persistent device identity")))
+                return
+            }
+            if !trustStore.canTransfer(identity: device.fingerprint) {
                 let code: NearsideErrorCode = trustStore.isBlocked(identity: device.fingerprint) ? .trustPeerBlocked : .trustUntrustedPeer
                 completion(.failure(NearsideError(code: code, operation: "sendFiles", message: "Pair the selected peer before sending")))
                 return
@@ -300,7 +314,17 @@ public final class TransferEngine: @unchecked Sendable {
                 // A Bonjour service endpoint resolves fresh addresses on every connection.
                 let live = DiscoveryService.shared.discoveredEndpoint(identity: device.fingerprint)
                 guard let endpoint = PeerEndpointRecovery.endpoint(for: device, live: live) else {
-                    completion(.failure(NearsideError(code: .connectionRefused, operation: "executeAttempt", message: "Selected peer has no live endpoint", correlationId: transferId, retryCount: attempt)))
+                    let failure = NearsideError(code: .connectionRefused, operation: "refreshPeerEndpoint", message: "Selected peer has no live endpoint", correlationId: transferId, retryCount: attempt)
+                    if attempt < retryPolicy.maxAttempts {
+                        NearsideLogger.shared.warn("connection", "refreshPeerEndpoint", "Waiting for selected peer discovery", state: "retrying", correlationId: transferId, errorCode: .connectionRefused, retryCount: attempt)
+                        self.queue.asyncAfter(deadline: .now() + max(1, retryPolicy.delay(forAttempt: attempt))) {
+                            executeAttempt(attempt: attempt + 1)
+                        }
+                    } else {
+                        let exhausted = NearsideError(code: .transferRetryExhausted, operation: "refreshPeerEndpoint", message: "Selected peer discovery retries exhausted", underlyingError: failure, correlationId: transferId, retryCount: attempt)
+                        NearsideLogger.shared.error(exhausted, state: "failed")
+                        completion(.failure(exhausted))
+                    }
                     return
                 }
                 NearsideLogger.shared.debug(
@@ -376,7 +400,12 @@ public final class TransferEngine: @unchecked Sendable {
                         NearsideLogger.shared.error(finalErr, state: "failed")
                         completion(.failure(finalErr))
                     } else {
-                        completion(.failure(error))
+                        let failure = (error as? NearsideError).map {
+                            NearsideError(code: $0.code, operation: $0.operation, message: $0.message,
+                                underlyingError: error, correlationId: transferId, retryCount: attempt)
+                        } ?? NearsideError(code: .protocolDecodeFailed, operation: "executeAttempt", message: "Invalid peer transfer response", underlyingError: error, correlationId: transferId, retryCount: attempt)
+                        NearsideLogger.shared.error(failure, state: "failed")
+                        completion(.failure(failure))
                     }
                 }
 
@@ -392,8 +421,6 @@ public final class TransferEngine: @unchecked Sendable {
                     guard let self = self else { return }
                     switch state {
                     case .ready:
-                        timeoutItem?.cancel()
-                        timeoutItem = nil
                         NearsideLogger.shared.info(
                             "connection",
                             "stateUpdate",
@@ -401,8 +428,17 @@ public final class TransferEngine: @unchecked Sendable {
                             state: "transferring",
                             correlationId: transferId
                         )
-                        self.performOutboundStream(
-                            connection: connection,
+                        SecureTransferConnection.client(connection: connection, identity: localIdentity, target: device.fingerprint, trustStore: trustStore) { channelResult in
+                            switch channelResult {
+                            case .failure(let error): handleAttemptFailure(error: error)
+                            case .success(let channel):
+                                lock.lock()
+                                let expired = hasCompletedOrRetried
+                                lock.unlock()
+                                guard !expired else { channel.cancel(); return }
+                                timeoutItem?.cancel(); timeoutItem = nil
+                                self.performOutboundStream(
+                            connection: channel,
                             manifest: manifest,
                             fileHandles: handles,
                             onProgress: onProgress,
@@ -417,7 +453,7 @@ public final class TransferEngine: @unchecked Sendable {
                                     connection.cancel()
                                     for h in handles { try? h.close() }
                                     if case let .hostPort(host, port) = connection.currentPath?.remoteEndpoint {
-                                        trustStore?.updatePeerEndpoint(identity: device.fingerprint, ip: "\(host)", port: port.rawValue)
+                                        trustStore.updatePeerEndpoint(identity: device.fingerprint, ip: "\(host)", port: port.rawValue)
                                     }
                                     var finalRecord = recordTemplate
                                     finalRecord.progress = 1.0
@@ -436,14 +472,16 @@ public final class TransferEngine: @unchecked Sendable {
                                 }
                             }
                         )
+                            }
+                        }
                     case .waiting(let err):
                         timeoutItem?.cancel()
                         timeoutItem = nil
-                        handleAttemptFailure(error: TransferEngineError.connectionFailed("Peer unreachable: \(err.localizedDescription)"))
+                        handleAttemptFailure(error: NearsideError(code: .connectionRefused, operation: "connectPeer", message: "Peer is unreachable", underlyingError: err, correlationId: transferId, retryCount: attempt))
                     case .failed(let err):
                         timeoutItem?.cancel()
                         timeoutItem = nil
-                        handleAttemptFailure(error: TransferEngineError.connectionFailed(err.localizedDescription))
+                        handleAttemptFailure(error: NearsideError(code: .connectionRefused, operation: "connectPeer", message: "Peer connection failed", underlyingError: err, correlationId: transferId, retryCount: attempt))
                     default:
                         break
                     }
@@ -457,7 +495,7 @@ public final class TransferEngine: @unchecked Sendable {
     }
 
     private func performOutboundStream(
-        connection: NWConnection,
+        connection: SecureTransferConnection,
         manifest: TransferManifest,
         fileHandles: [FileHandle],
         onProgress: @escaping (Double, Int64, Int64) -> Void,
@@ -480,13 +518,16 @@ public final class TransferEngine: @unchecked Sendable {
         connection.send(content: header, completion: .contentProcessed { [weak self] error in
             guard let self = self else { return }
             if let error = error {
-                onComplete(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                onComplete(.failure((error is NWError ? TransferEngineError.connectionFailed(error.localizedDescription) : error)))
                 return
             }
 
             self.receiveAck(connection: connection) { ackResult in
                 switch ackResult {
                 case .success(let ack):
+                    guard ack.transferId == manifest.transferId, (0...manifest.totalBytes).contains(ack.bytesReceived) else {
+                        onComplete(.failure(secureTransferFailure("Acknowledgment does not match transfer"))); return
+                    }
                     guard ack.status == "ACCEPTED" else {
                         onComplete(.failure(TransferEngineError.manifestRejected(ack.status)))
                         return
@@ -524,7 +565,7 @@ public final class TransferEngine: @unchecked Sendable {
         })
     }
 
-    private func receiveAck(connection: NWConnection, completion: @escaping (Result<TransferAck, Error>) -> Void) {
+    private func receiveAck(connection: SecureTransferConnection, completion: @escaping (Result<TransferAck, Error>) -> Void) {
         var completed = false
         let lock = NSLock()
 
@@ -558,7 +599,7 @@ public final class TransferEngine: @unchecked Sendable {
 
         connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { headerData, _, isComplete, error in
             if let error = error {
-                finish(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                finish(.failure((error is NWError ? TransferEngineError.connectionFailed(error.localizedDescription) : error)))
                 return
             }
             guard let data = headerData, data.count == 9 else {
@@ -566,15 +607,20 @@ public final class TransferEngine: @unchecked Sendable {
                 return
             }
 
+            guard data.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic,
+                  data[4] == FrameType.ack.rawValue else {
+                finish(.failure(secureTransferFailure("Receiver acknowledgment required"))); return
+            }
             let len = Int(data.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+            guard (1...16384).contains(len) else { finish(.failure(secureTransferFailure("Invalid acknowledgment size"))); return }
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, ackError in
                 if let ackError = ackError {
-                    finish(.failure(TransferEngineError.connectionFailed(ackError.localizedDescription)))
+                    finish(.failure((ackError is NWError ? TransferEngineError.connectionFailed(ackError.localizedDescription) : ackError)))
                     return
                 }
                 guard let payload = payloadData,
                       let ack = try? JSONDecoder().decode(TransferAck.self, from: payload) else {
-                    finish(.failure(TransferEngineError.connectionFailed("Malformed ACK payload")))
+                    finish(.failure(NearsideError(code: .protocolDecodeFailed, operation: "receiveAck", message: "Malformed acknowledgment payload")))
                     return
                 }
                 finish(.success(ack))
@@ -583,7 +629,7 @@ public final class TransferEngine: @unchecked Sendable {
     }
 
     private func streamFileChunks(
-        connection: NWConnection,
+        connection: SecureTransferConnection,
         manifest: TransferManifest,
         fileHandles: [FileHandle],
         startItemIndex: Int = 0,
@@ -607,10 +653,19 @@ public final class TransferEngine: @unchecked Sendable {
 
                 connection.send(content: completeHeader, completion: .contentProcessed { error in
                     if let error = error {
-                        onComplete(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                        onComplete(.failure((error is NWError ? TransferEngineError.connectionFailed(error.localizedDescription) : error)))
                     } else {
-                        onProgress(1.0, totalBytes, totalBytes)
-                        onComplete(.success(()))
+                        self.receiveAck(connection: connection) { result in
+                            switch result {
+                            case .failure(let error): onComplete(.failure(error))
+                            case .success(let ack):
+                                guard ack.transferId == manifest.transferId, ack.status == "COMPLETED", ack.bytesReceived == totalBytes else {
+                                    onComplete(.failure(secureTransferFailure("Receiver did not verify transfer completion"))); return
+                                }
+                                onProgress(1.0, totalBytes, totalBytes)
+                                onComplete(.success(()))
+                            }
+                        }
                     }
                 })
                 return
@@ -632,7 +687,7 @@ public final class TransferEngine: @unchecked Sendable {
 
             connection.send(content: packet, completion: .contentProcessed { error in
                 if let error = error {
-                    onComplete(.failure(TransferEngineError.connectionFailed(error.localizedDescription)))
+                    onComplete(.failure((error is NWError ? TransferEngineError.connectionFailed(error.localizedDescription) : error)))
                     return
                 }
 
@@ -653,6 +708,7 @@ public final class TransferEngine: @unchecked Sendable {
     public func handleInboundConnection(
         connection: NWConnection,
         trustStore: PinnedTrustStore,
+        deviceIdentity: DeviceIdentity? = nil,
         destinationFolder: URL,
         onProgress: @escaping (Double, TransferRecord) -> Void,
         onComplete: @escaping (Result<TransferRecord, Error>) -> Void
@@ -665,6 +721,25 @@ public final class TransferEngine: @unchecked Sendable {
             state: "connecting",
             correlationId: connectionId
         )
+
+        let completionLock = NSLock()
+        var finished = false
+        var handshakeDeadline: DispatchWorkItem?
+        func complete(_ result: Result<TransferRecord, Error>) {
+            completionLock.lock()
+            guard !finished else { completionLock.unlock(); return }
+            finished = true
+            handshakeDeadline?.cancel()
+            completionLock.unlock()
+            connection.cancel()
+            onComplete(result)
+        }
+        let deadline = DispatchWorkItem {
+            connection.cancel()
+            complete(.failure(NearsideError(code: .connectionTimedOut, operation: "authenticateTransfer", message: "Secure handshake timed out", correlationId: connectionId)))
+        }
+        handshakeDeadline = deadline
+        self.queue.asyncAfter(deadline: .now() + 8, execute: deadline)
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -682,13 +757,13 @@ public final class TransferEngine: @unchecked Sendable {
             if let error = error {
                 let err = NearsideError(code: .connectionClosed, operation: "readHeader", message: error.localizedDescription, underlyingError: error, correlationId: connectionId)
                 NearsideLogger.shared.error(err, state: "failed")
-                onComplete(.failure(err))
+                complete(.failure(err))
                 return
             }
             guard let data = headerData, data.count == 9 else {
                 let err = NearsideError(code: .protocolMagicMismatch, operation: "readHeader", message: "Invalid manifest header length", correlationId: connectionId)
                 NearsideLogger.shared.error(err, state: "failed")
-                onComplete(.failure(err))
+                complete(.failure(err))
                 return
             }
 
@@ -698,21 +773,58 @@ public final class TransferEngine: @unchecked Sendable {
             if frameType == FrameType.pairRequest.rawValue {
                 guard (1...16384).contains(len), data.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic else {
                     connection.cancel()
-                    onComplete(.failure(PairingError.malformedPayload.toNearsideError(correlationId: connectionId)))
+                    complete(.failure(PairingError.malformedPayload.toNearsideError(correlationId: connectionId)))
                     return
                 }
                 connection.receive(minimumIncompleteLength: len, maximumLength: len) { payload, _, _, error in
                     guard error == nil, let payload = payload, payload.count == len,
                           let request = try? JSONDecoder().decode(PairRequestFrame.self, from: payload) else {
                         connection.cancel()
-                        onComplete(.failure(PairingError.malformedPayload.toNearsideError(correlationId: connectionId)))
+                        complete(.failure(PairingError.malformedPayload.toNearsideError(correlationId: connectionId)))
                         return
                     }
-                    self.handleQRPairRequest(connection: connection, request: request, trustStore: trustStore, onComplete: onComplete)
+                    self.handleQRPairRequest(connection: connection, request: request, trustStore: trustStore, onComplete: complete)
                 }
                 return
             }
 
+            guard frameType == 0x20, data.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic else {
+                connection.cancel()
+                complete(.failure(secureTransferFailure("Authenticated encrypted transfer required")))
+                return
+            }
+            let identity: DeviceIdentity
+            do { identity = try deviceIdentity ?? DeviceIdentity.loadOrCreatePersistent() }
+            catch { connection.cancel(); complete(.failure(error)); return }
+            SecureTransferConnection.server(connection: connection, helloLength: len, identity: identity, trustStore: trustStore) { result in
+                switch result {
+                case .failure(let error): connection.cancel(); complete(.failure(error))
+                case .success(let channel):
+                    completionLock.lock()
+                    let expired = finished
+                    completionLock.unlock()
+                    guard !expired else { channel.cancel(); return }
+                    handshakeDeadline?.cancel()
+                    self.readSecureManifest(connection: channel, trustStore: trustStore, destinationFolder: destinationFolder,
+                        connectionId: connectionId, onProgress: onProgress, onComplete: complete)
+                }
+            }
+        }
+    }
+
+    private func readSecureManifest(connection: SecureTransferConnection, trustStore: PinnedTrustStore, destinationFolder: URL,
+        connectionId: String, onProgress: @escaping (Double, TransferRecord) -> Void,
+        onComplete: @escaping (Result<TransferRecord, Error>) -> Void) {
+        connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { data, _, _, error in
+            guard error == nil, let data = data, data.count == 9,
+                  data.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic,
+                  data[4] == FrameType.manifest.rawValue else {
+                connection.cancel(); onComplete(.failure(error ?? secureTransferFailure("Expected authenticated manifest"))); return
+            }
+            let len = Int(data.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+            guard (1...SecureTransferRecords.maxRecord).contains(len) else {
+                connection.cancel(); onComplete(.failure(secureTransferFailure("Invalid manifest size"))); return
+            }
             connection.receive(minimumIncompleteLength: len, maximumLength: len) { payloadData, _, _, manError in
                 if let manError = manError {
                     let err = NearsideError(code: .connectionClosed, operation: "readManifest", message: manError.localizedDescription, underlyingError: manError, correlationId: connectionId)
@@ -728,6 +840,9 @@ public final class TransferEngine: @unchecked Sendable {
                     return
                 }
 
+                guard manifest.senderId == connection.peerIdentity else {
+                    connection.cancel(); onComplete(.failure(secureTransferFailure("Manifest sender differs from authenticated peer"))); return
+                }
                 NearsideLogger.shared.info(
                     "transfer",
                     "handleInboundConnection",
@@ -739,6 +854,23 @@ public final class TransferEngine: @unchecked Sendable {
                         "sender": NearsideRedactor.sanitizeIdentity(manifest.senderId)
                     ]
                 )
+
+                var declaredTotal: Int64 = 0
+                guard manifest.itemCount == manifest.items.count, (1...1024).contains(manifest.itemCount),
+                      Set(manifest.items.map { $0.name }).count == manifest.itemCount else {
+                    connection.cancel(); onComplete(.failure(secureTransferFailure("Invalid manifest item count"))); return
+                }
+                for (index, item) in manifest.items.enumerated() {
+                    let total = declaredTotal.addingReportingOverflow(item.size)
+                    guard item.index == index, item.size >= 0, !total.overflow,
+                          item.sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+                        connection.cancel(); onComplete(.failure(secureTransferFailure("Invalid manifest item"))); return
+                    }
+                    declaredTotal = total.partialValue
+                }
+                guard declaredTotal == manifest.totalBytes else {
+                    connection.cancel(); onComplete(.failure(secureTransferFailure("Invalid manifest total"))); return
+                }
 
                 // Strict path traversal defense
                 for item in manifest.items {
@@ -776,50 +908,46 @@ public final class TransferEngine: @unchecked Sendable {
                 var totalResumedBytes: Int64 = 0
                 var initialHandles: [Int: FileHandle] = [:]
                 var initialHashers: [Int: SHA256] = [:]
-
-                for item in manifest.items {
-                    let destURL = destinationFolder.appendingPathComponent(item.name)
-                    var itemHasher = SHA256()
-
-                    if FileManager.default.fileExists(atPath: destURL.path),
-                       let attrs = try? FileManager.default.attributesOfItem(atPath: destURL.path),
-                       let fileSize = (attrs[.size] as? NSNumber)?.int64Value,
-                       fileSize > 0 && fileSize <= item.size {
-
-                        if let readHandle = try? FileHandle(forReadingFrom: destURL) {
-                            var bytesHashed: Int64 = 0
-                            while bytesHashed < fileSize {
-                                let chunk = readHandle.readData(ofLength: TransferChunk.maxChunkSize)
-                                if chunk.isEmpty { break }
-                                itemHasher.update(data: chunk)
-                                bytesHashed += Int64(chunk.count)
+                var initialOffsets: [Int: Int64] = [:]
+                var mayResumePrefix = true
+                do {
+                    for item in manifest.items {
+                        let destURL = destinationFolder.appendingPathComponent(item.name)
+                        let attributes = try? FileManager.default.attributesOfItem(atPath: destURL.path)
+                        if attributes?[.type] as? FileAttributeType == .typeSymbolicLink { throw secureTransferFailure("Unsafe destination path") }
+                        var hasher = SHA256()
+                        var resume: Int64 = 0
+                        if mayResumePrefix, let fileSize = (attributes?[.size] as? NSNumber)?.int64Value,
+                           fileSize > 0, fileSize <= item.size {
+                            let read = try FileHandle(forReadingFrom: destURL)
+                            defer { try? read.close() }
+                            var count: Int64 = 0
+                            while count < fileSize {
+                                let bytes = try read.read(upToCount: min(TransferChunk.maxChunkSize, Int(fileSize - count))) ?? Data()
+                                guard !bytes.isEmpty else { throw TransferEngineError.fileAccessError("Resume file changed during read") }
+                                hasher.update(data: bytes); count += Int64(bytes.count)
                             }
-                            try? readHandle.close()
-                        }
-
-                        if fileSize == item.size {
-                            let calculated = itemHasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
-                            if calculated == item.sha256 {
-                                totalResumedBytes += fileSize
-                                initialHashers[item.index] = itemHasher
-                                continue
+                            resume = fileSize
+                            if fileSize == item.size, hasher.finalize().compactMap({ String(format: "%02x", $0) }).joined() != item.sha256 {
+                                resume = 0; hasher = SHA256()
                             }
                         }
-
-                        if let writeHandle = try? FileHandle(forUpdating: destURL) {
-                            try? writeHandle.seek(toOffset: UInt64(fileSize))
-                            initialHandles[item.index] = writeHandle
-                            initialHashers[item.index] = itemHasher
-                            totalResumedBytes += fileSize
-                            continue
+                        if resume == 0 {
+                            guard FileManager.default.createFile(atPath: destURL.path, contents: Data()) else { throw TransferEngineError.fileAccessError("Cannot create destination file") }
                         }
-                    }
-
-                    FileManager.default.createFile(atPath: destURL.path, contents: nil)
-                    if let handle = try? FileHandle(forWritingTo: destURL) {
+                        let handle = try FileHandle(forUpdating: destURL)
+                        try handle.seek(toOffset: UInt64(resume))
                         initialHandles[item.index] = handle
-                        initialHashers[item.index] = SHA256()
+                        initialHashers[item.index] = hasher
+                        initialOffsets[item.index] = resume
+                        totalResumedBytes += resume
+                        mayResumePrefix = mayResumePrefix && resume == item.size
                     }
+                } catch {
+                    initialHandles.values.forEach { try? $0.close() }
+                    connection.cancel()
+                    onComplete(.failure(NearsideError(code: .storageWriteFailed, operation: "prepareInboundFiles", message: "Cannot prepare destination files", underlyingError: error, correlationId: manifest.transferId)))
+                    return
                 }
 
                 let ack = TransferAck(
@@ -830,7 +958,11 @@ public final class TransferEngine: @unchecked Sendable {
                     readyForStream: true
                 )
 
-                self.sendAck(connection: connection, ack: ack) {
+                self.sendAck(connection: connection, ack: ack) { error in
+                    if let error = error {
+                        initialHandles.values.forEach { try? $0.close() }
+                        connection.cancel(); onComplete(.failure(error)); return
+                    }
                     self.receiveInboundChunks(
                         connection: connection,
                         manifest: manifest,
@@ -838,6 +970,7 @@ public final class TransferEngine: @unchecked Sendable {
                         initialHandles: initialHandles,
                         initialHashers: initialHashers,
                         initialBytesReceived: totalResumedBytes,
+                        initialOffsets: initialOffsets,
                         onProgress: onProgress,
                         onComplete: onComplete
                     )
@@ -846,8 +979,8 @@ public final class TransferEngine: @unchecked Sendable {
         }
     }
 
-    private func sendAck(connection: NWConnection, ack: TransferAck, completion: @escaping () -> Void) {
-        guard let data = try? JSONEncoder().encode(ack) else { return }
+    private func sendAck(connection: SecureTransferConnection, ack: TransferAck, completion: @escaping (Error?) -> Void) {
+        guard let data = try? JSONEncoder().encode(ack) else { completion(secureTransferFailure("Cannot encode acknowledgment")); return }
         var packet = Data()
         var magicBE = TransferChunk.magic.bigEndian
         packet.append(Data(bytes: &magicBE, count: 4))
@@ -857,12 +990,12 @@ public final class TransferEngine: @unchecked Sendable {
         packet.append(Data(bytes: &lenBE, count: 4))
         packet.append(data)
 
-        connection.send(content: packet, completion: .contentProcessed { _ in
-            completion()
+        connection.send(content: packet, completion: .contentProcessed { error in
+            completion(error)
         })
     }
 
-    private func sendError(connection: NWConnection, code: Int, reason: String, detail: String) {
+    private func sendError(connection: SecureTransferConnection, code: Int, reason: String, detail: String) {
         let err = ErrorFrame(code: code, reason: reason, detail: detail)
         guard let data = try? JSONEncoder().encode(err) else { return }
         var packet = Data()
@@ -880,12 +1013,13 @@ public final class TransferEngine: @unchecked Sendable {
     }
 
     private func receiveInboundChunks(
-        connection: NWConnection,
+        connection: SecureTransferConnection,
         manifest: TransferManifest,
         destinationFolder: URL,
         initialHandles: [Int: FileHandle],
         initialHashers: [Int: SHA256],
         initialBytesReceived: Int64,
+        initialOffsets: [Int: Int64],
         onProgress: @escaping (Double, TransferRecord) -> Void,
         onComplete: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
@@ -905,6 +1039,7 @@ public final class TransferEngine: @unchecked Sendable {
         let itemHandles = initialHandles
         var itemHashers = initialHashers
         var bytesReceived: Int64 = initialBytesReceived
+        var receivedOffsets = initialOffsets
 
         func closeHandles() {
             for (_, h) in itemHandles { try? h.close() }
@@ -932,13 +1067,6 @@ public final class TransferEngine: @unchecked Sendable {
             }
         }
 
-        if initialBytesReceived == manifest.totalBytes && manifest.totalBytes > 0 {
-            closeHandles()
-            finalizeRecord()
-            onComplete(.success(currentRecord))
-            return
-        }
-
         func receiveNext() {
             connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { headerData, _, _, error in
                 if let error = error {
@@ -952,11 +1080,23 @@ public final class TransferEngine: @unchecked Sendable {
                     return
                 }
 
+                guard h.prefix(4).withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }).bigEndian == TransferChunk.magic else {
+                    closeHandles(); onComplete(.failure(secureTransferFailure("Invalid encrypted chunk magic"))); return
+                }
                 let frameType = h[4]
                 if frameType == FrameType.complete.rawValue {
-                    closeHandles()
+                    do { try itemHandles.values.forEach { try $0.close() } }
+                    catch { onComplete(.failure(NearsideError(code: .storageWriteFailed, operation: "closeInboundFiles", message: "Cannot finish destination files", underlyingError: error, correlationId: manifest.transferId))); return }
+                    guard bytesReceived == manifest.totalBytes, h.suffix(4).allSatisfy({ $0 == 0 }) else {
+                        onComplete(.failure(secureTransferFailure("Incomplete transfer byte count"))); return
+                    }
                     for item in manifest.items {
-                        if let hasher = itemHashers[item.index] {
+                        let url = destinationFolder.appendingPathComponent(item.name)
+                        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
+                        guard receivedOffsets[item.index] == item.size, size == item.size, let hasher = itemHashers[item.index] else {
+                            onComplete(.failure(secureTransferFailure("Incomplete transfer item"))); return
+                        }
+                        do {
                             let calculated = hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
                             if calculated != item.sha256 {
                                 let err = NearsideError(
@@ -972,6 +1112,12 @@ public final class TransferEngine: @unchecked Sendable {
                         }
                     }
                     finalizeRecord()
+                    let completedAck = TransferAck(transferId: manifest.transferId, status: "COMPLETED",
+                        acceptedItems: manifest.items.map { $0.index }, bytesReceived: manifest.totalBytes, readyForStream: false)
+                    self.sendAck(connection: connection, ack: completedAck) { error in
+                        if let error = error { onComplete(.failure(error)) }
+                        else { onComplete(.success(currentRecord)) }
+                    }
                     NearsideLogger.shared.info(
                         "transfer",
                         "receiveInboundChunks",
@@ -980,7 +1126,6 @@ public final class TransferEngine: @unchecked Sendable {
                         correlationId: manifest.transferId,
                         metadata: ["totalBytes": "\(manifest.totalBytes)"]
                     )
-                    onComplete(.success(currentRecord))
                     return
                 }
 
@@ -993,6 +1138,9 @@ public final class TransferEngine: @unchecked Sendable {
                 }
 
                 let payloadLen = Int(h.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+                guard (1...TransferChunk.maxChunkSize).contains(payloadLen) else {
+                    closeHandles(); onComplete(.failure(secureTransferFailure("Invalid transfer chunk size"))); return
+                }
                 let remainingExpected = 12 + payloadLen + 32
 
                 connection.receive(minimumIncompleteLength: remainingExpected, maximumLength: remainingExpected) { restData, _, _, restErr in
@@ -1011,7 +1159,7 @@ public final class TransferEngine: @unchecked Sendable {
                         return
                     }
 
-                    let itemIndex = Int(r.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+                    let itemIndex = Int(r.subdata(in: 0..<4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
                     let offset = r.subdata(in: 4..<12).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
                     let chunkPayload = r.subdata(in: 12..<(12 + payloadLen))
                     let presentedHash = r.subdata(in: (12 + payloadLen)..<remainingExpected)
@@ -1030,11 +1178,19 @@ public final class TransferEngine: @unchecked Sendable {
                         return
                     }
 
-                    if let handle = itemHandles[itemIndex] {
-                        try? handle.seek(toOffset: offset)
-                        handle.write(chunkPayload)
-                        itemHashers[itemIndex]?.update(data: chunkPayload)
+                    guard let handle = itemHandles[itemIndex], let expectedOffset = receivedOffsets[itemIndex],
+                          manifest.items.indices.contains(itemIndex), offset == UInt64(expectedOffset),
+                          Int64(payloadLen) <= manifest.items[itemIndex].size - expectedOffset else {
+                        closeHandles(); onComplete(.failure(secureTransferFailure("Invalid transfer chunk offset"))); return
                     }
+                    do {
+                        try handle.seek(toOffset: offset)
+                        try handle.write(contentsOf: chunkPayload)
+                    } catch {
+                        closeHandles(); onComplete(.failure(NearsideError(code: .storageWriteFailed, operation: "writeInboundChunk", message: "Cannot write destination file", underlyingError: error, correlationId: manifest.transferId))); return
+                    }
+                    itemHashers[itemIndex]?.update(data: chunkPayload)
+                    receivedOffsets[itemIndex] = expectedOffset + Int64(payloadLen)
 
                     bytesReceived += Int64(chunkPayload.count)
                     let progress = (manifest.totalBytes > 0) ? Double(bytesReceived) / Double(manifest.totalBytes) : 1.0
@@ -1094,7 +1250,7 @@ extension TransferEngine {
                   let clientNonce = Data(base64Encoded: clientNonceString), clientNonce.count == 32,
                   request.qrConfirmationBase64 == nil else { throw PairingError.malformedPayload }
             let payload = try QRPairingSessions.shared.requireActive(sessionId)
-            let identity = DeviceIdentity.loadOrCreateDefault()
+            let identity = try DeviceIdentity.loadOrCreatePersistent()
             guard payload.hostIdentity == identity.publicIdentity,
                   let spki = Data(base64Encoded: request.clientSpkiBase64),
                   DeviceIdentity.computeIdentity(fromSpki: spki) == request.clientId,
