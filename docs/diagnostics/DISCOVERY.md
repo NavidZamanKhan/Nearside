@@ -57,3 +57,43 @@ native resolution when stopping or timing out. Older Android versions retain the
 in-flight slot until its terminal callback, while discarding its stale registration data,
 to avoid flooding subsequent peers with `ALREADY_ACTIVE` errors. Transfer discovery
 refresh still has its own two-second deadline on every supported version.
+
+## Trusted peer presence on Apple platforms
+
+`PeerPresenceSnapshot` reconciles each live discovery snapshot against enrolled identities.
+Enrollment starts offline. A valid discovery record must have the same `id` and `ns1_`
+fingerprint as the trusted record to bring that identity online. Multiple announcements
+collapse by identity, using the latest endpoint hint. Discovery cannot rename an enrolled
+peer, establish trust, or merge two identities with the same display name. Losing discovery
+marks the existing trusted row offline; its next announcement updates that same row.
+
+The macOS shelf separates **Trusted Devices** from **Available Nearby**. Only trusted,
+online, unblocked peers can receive content through shelf buttons, per-device drops, or
+the shared recipient picker. The recipient is checked again when the action runs.
+`NS-DISC-003`, operation `shelfSend`, with a fresh correlation ID identifies a selected
+recipient that disappeared while a file chooser or drop was in progress.
+
+An Android reinstall creates a different enrollment identity. The older entry remains
+trusted and offline until the user confirms **Unpair** for that specific fingerprint.
+Trust removal is saved before the device list changes. A storage failure retains the
+original trust relationship, reports `NS-TRUST-004` with operation `unpairDevice`, and
+shows a retry message. No name-based trust cleanup takes place.
+
+Regression verification: `bash scripts/verify_peer_presence.sh` covers initial offline
+state, exact identity matching, multiple aliases, same-name identities, disappearance,
+reappearance, receiving paused, and durable removal of only the selected peer.
+
+Manual macOS checks:
+
+1. Launch with a previously enrolled phone unavailable. Its trusted row is gray and
+   offline; Clipboard, Send, and per-device drop are disabled.
+2. Start that phone on the same Wi-Fi network. The existing identity row becomes green
+   and online. Quit or disconnect the phone and verify the row returns to offline.
+3. With two enrolled identities sharing a phone name, keep only the current installation
+   running. Only its fingerprint becomes online. Cancel Unpair for the older fingerprint
+   and verify both pins remain, then confirm removal and restart to verify persistence.
+4. Display **Pair Device / Show QR** directly from the shelf. Use the phone's Scan QR
+   action to pair, then verify the phone appears under Trusted Devices. A nearby Pair
+   action displays a QR session restricted to the selected cryptographic identity.
+5. Keep an unpaired nearby phone present. It shows Pair under Available Nearby and is
+   excluded from every transfer recipient picker until enrollment succeeds.

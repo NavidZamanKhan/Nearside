@@ -134,12 +134,26 @@ public final class PinnedTrustStore: @unchecked Sendable {
     }
 
     public func unpair(identity: String) {
+        do { try unpairPersisted(identity: identity) }
+        catch { NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "unpair", cause: error), state: "failed") }
+    }
+
+    /// The caller may update its device list only after removal has been saved.
+    public func unpairPersisted(identity: String) throws {
         lock.lock(); defer { lock.unlock() }
+        let previousKey = enrolledKeys[identity]
+        let previousRecord = peerMetadata[identity]
+        let wasBlocked = blockedIdentities.contains(identity)
         enrolledKeys.removeValue(forKey: identity)
         peerMetadata.removeValue(forKey: identity)
         blockedIdentities.remove(identity)
         do { try saveToDisk() }
-        catch { NearsideLogger.shared.error((error as? NearsideError) ?? storageFailure(operation: "saveTrustStore", cause: error), state: "failed") }
+        catch {
+            enrolledKeys[identity] = previousKey
+            peerMetadata[identity] = previousRecord
+            if wasBlocked { blockedIdentities.insert(identity) }
+            throw error
+        }
         NearsideLogger.shared.info("trust", "unpair", "Unpaired peer", metadata: ["peer": NearsideRedactor.sanitizeIdentity(identity)])
     }
 

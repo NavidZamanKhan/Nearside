@@ -32,6 +32,10 @@ struct TrustStorageRegressionTests {
         store.enroll(identity: other.publicIdentity, name: "Other", platform: "android", publicKey: other.publicKey)
         check(!store.canTransfer(identity: other.publicIdentity), "Compatibility enrollment rolls back failed persistence")
         check(store.canTransfer(identity: peer.publicIdentity), "Failed persistence preserves existing enrollment")
+        rejects(.trustStorageFailed, "Unpair cannot report success before persistence") {
+            try store.unpairPersisted(identity: peer.publicIdentity)
+        }
+        check(store.canTransfer(identity: peer.publicIdentity), "Failed unpair restores the intended pin")
         check(try Data(contentsOf: backup) == savedBytes, "Failed write preserves previous stored bytes")
         check(lines.contains { $0.contains("NS-TRUST-004") }, "Storage failures produce a stable diagnostic code")
         check(!lines.joined().contains(root.path), "Storage diagnostics omit private paths")
@@ -71,7 +75,7 @@ struct TrustStorageRegressionTests {
         check(reloaded.allEnrolledPeers().count == peers.count, "Concurrent trust transactions preserve every enrollment")
         check(peers.enumerated().allSatisfy { reloaded.canTransfer(identity: $0.element.publicIdentity) == !$0.offset.isMultiple(of: 2) },
             "Concurrent blocks and endpoint updates persist consistently")
-        print("TrustStorageRegressionTests: 16 checks passed")
+        print("TrustStorageRegressionTests: 18 checks passed")
     }
     static func check(_ condition: Bool, _ message: String) {
         precondition(condition, message)

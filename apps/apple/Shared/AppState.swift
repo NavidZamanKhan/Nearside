@@ -28,10 +28,11 @@ public final class AppState: ObservableObject {
     @Published public var latestReceivedText: String?
     @Published public var clipboardToastMessage: String?
 
-    public init() {
-        let identity = DeviceIdentity.loadOrCreateDefault()
+    public init(deviceIdentity: DeviceIdentity? = nil, trustStore: PinnedTrustStore? = nil,
+        startsDiscovery: Bool = true) {
+        let identity = deviceIdentity ?? DeviceIdentity.loadOrCreateDefault()
         self.deviceIdentity = identity
-        self.trustStore = PinnedTrustStore()
+        self.trustStore = trustStore ?? PinnedTrustStore()
 
 #if os(macOS)
         let hostName = Host.current().localizedName ?? "MacBook Pro"
@@ -49,7 +50,7 @@ public final class AppState: ObservableObject {
         self.localFingerprint = identity.publicIdentity
 
         loadInitialTrustAndSeedData()
-        startDiscoveryEngine()
+        if startsDiscovery { startDiscoveryEngine() }
     }
 
     private func loadInitialTrustAndSeedData() {
@@ -72,7 +73,7 @@ public final class AppState: ObservableObject {
                     fingerprint: record.identity,
                     ipAddress: record.lastKnownIp,
                     port: record.lastKnownPort,
-                    reachability: .online,
+                    reachability: .unreachable,
                     lastSeen: record.enrolledAt
                 )
             }
@@ -88,7 +89,7 @@ public final class AppState: ObservableObject {
         let service = DiscoveryService.shared
         service.onDiscoveredDevicesChanged = { [weak self] devices in
             guard let self = self else { return }
-            self.discoveredDevices = devices
+            self.updateDiscoveryPresence(devices)
         }
         service.onInboundConnection = { [weak self] connection in
             guard let self = self else { return }
@@ -296,9 +297,47 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func unpairDevice(id: String) {
-        pairedDevices.removeAll { $0.id == id }
-        trustStore.unpair(identity: id)
+    public var availableNearbyDevices: [NearsideDevice] {
+        PeerPresenceSnapshot(trustedDevices: pairedDevices, discoveredDevices: discoveredDevices).availableNearbyDevices
+    }
+
+    public var onlineTransferRecipients: [NearsideDevice] {
+        pairedDevices.filter { $0.reachability == .online && trustStore.canTransfer(identity: $0.fingerprint) }
+    }
+
+    public func updateDiscoveryPresence(_ devices: [NearsideDevice]) {
+        let snapshot = PeerPresenceSnapshot(trustedDevices: pairedDevices, discoveredDevices: devices)
+        pairedDevices = snapshot.trustedDevices
+        discoveredDevices = snapshot.discoveredDevices
+    }
+
+    /// Called after enrollment so a completed handshake cannot invent ongoing discovery presence.
+    public func refreshTrustedDevices() {
+        pairedDevices = trustStore.allEnrolledPeers().map { record in
+            let platform = DevicePlatform(rawValue: record.platformRaw.lowercased()) ?? .android
+            return NearsideDevice(id: record.identity, name: record.name, platform: platform,
+                fingerprint: record.identity, ipAddress: record.lastKnownIp, port: record.lastKnownPort,
+                reachability: .unreachable, lastSeen: record.enrolledAt)
+        }
+        updateDiscoveryPresence(discoveredDevices)
+    }
+
+    @discardableResult
+    public func unpairDevice(id: String) -> Result<Void, Error> {
+        let correlationId = UUID().uuidString
+        do {
+            try trustStore.unpairPersisted(identity: id)
+            refreshTrustedDevices()
+            clipboardToastMessage = "Device unpaired"
+            return .success(())
+        } catch {
+            let failure = NearsideError(code: .trustStorageFailed, operation: "unpairDevice",
+                message: "Could not save trust removal. The device is still paired; retry after checking storage access.",
+                underlyingError: error, correlationId: correlationId)
+            NearsideLogger.shared.error(failure, state: "failed")
+            clipboardToastMessage = "Unpair failed [\(failure.code.rawValue)]. The device is still paired."
+            return .failure(failure)
+        }
     }
 
     public func removeTransferRecord(id: String) {

@@ -98,7 +98,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 fingerprint = record.identity,
                 ipAddress = record.lastKnownIp,
                 port = record.lastKnownPort,
-                reachability = DeviceReachability.ONLINE
+                reachability = DeviceReachability.UNREACHABLE
             )
             NsdDiscoveryService.findDiscoveredDevice(record.identity)?.let { live ->
                 paired.copy(ipAddress = live.ipAddress, port = live.port, reachability = live.reachability)

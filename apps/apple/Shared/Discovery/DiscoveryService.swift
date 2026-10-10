@@ -91,7 +91,11 @@ public final class DiscoveryService: @unchecked Sendable {
             txt["v"] = "1"
             txt["id"] = localIdentity
             txt["name"] = localDeviceName
+            #if os(iOS)
+            txt["os"] = "ios"
+            #else
             txt["os"] = "macos"
+            #endif
             txt["pair"] = "1"
             txt["recv"] = isReceivingActive ? "1" : "0"
             txt["port"] = "\(boundPort)"
@@ -147,7 +151,11 @@ public final class DiscoveryService: @unchecked Sendable {
         txt["v"] = "1"
         txt["id"] = localIdentity
         txt["name"] = localDeviceName
+        #if os(iOS)
+        txt["os"] = "ios"
+        #else
         txt["os"] = "macos"
+        #endif
         txt["pair"] = "1"
         txt["recv"] = isReceivingActive ? "1" : "0"
         txt["port"] = "\(boundPort)"
@@ -183,13 +191,21 @@ public final class DiscoveryService: @unchecked Sendable {
             self.handleBrowseResults(results)
         }
 
-        newBrowser.stateUpdateHandler = { state in
+        newBrowser.stateUpdateHandler = { [weak self] state in
+            guard let self = self, self.browser === newBrowser else { return }
             switch state {
             case .ready:
                 NearsideLogger.shared.info("discovery", "setupBrowser", "mDNS browser ready for _nearside._tcp", state: "browsing")
             case .failed(let error):
                 let err = NearsideError(code: .discoveryBrowserFailed, operation: "setupBrowser", message: "Discovery browser failed", underlyingError: error)
                 NearsideLogger.shared.error(err, state: "failed")
+                self.discoveredMap.removeAll()
+                self.discoveredEndpoints.removeAll()
+                DispatchQueue.main.async { [weak self] in self?.onDiscoveredDevicesChanged?([]) }
+            case .cancelled:
+                self.discoveredMap.removeAll()
+                self.discoveredEndpoints.removeAll()
+                DispatchQueue.main.async { [weak self] in self?.onDiscoveredDevicesChanged?([]) }
             default:
                 break
             }
