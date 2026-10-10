@@ -52,6 +52,7 @@ public struct RetryPolicy: Sendable {
     public static let `default` = RetryPolicy(maxAttempts: 3, initialDelay: 0.5, multiplier: 2.0)
 
     public init(maxAttempts: Int = 3, initialDelay: TimeInterval = 0.5, multiplier: Double = 2.0) {
+        precondition((1...10).contains(maxAttempts) && initialDelay.isFinite && (0...30).contains(initialDelay) && multiplier.isFinite && multiplier >= 1)
         self.maxAttempts = maxAttempts
         self.initialDelay = initialDelay
         self.multiplier = multiplier
@@ -59,7 +60,29 @@ public struct RetryPolicy: Sendable {
 
     public func delay(forAttempt attempt: Int) -> TimeInterval {
         guard attempt > 0 else { return 0 }
-        return initialDelay * pow(multiplier, Double(attempt - 1))
+        return min(30, initialDelay * pow(multiplier, Double(attempt - 1)))
+    }
+}
+
+enum PeerEndpointRecovery {
+    static func endpoint(for device: NearsideDevice, live: NWEndpoint?) -> NWEndpoint? {
+        guard device.id == device.fingerprint else { return nil }
+        if let live = live { return live }
+        guard let address = device.ipAddress, !address.isEmpty,
+              let port = NWEndpoint.Port(rawValue: device.port ?? 41433), port.rawValue > 0 else { return nil }
+        if address.hasPrefix("Nearside-") || (!address.contains(".") && !address.contains(":")) {
+            return .service(name: address, type: "_nearside._tcp", domain: "local.", interface: nil)
+        }
+        return .hostPort(host: NWEndpoint.Host(address), port: port)
+    }
+
+    static func shouldRetry(error: Error, attempt: Int, policy: RetryPolicy) -> Bool {
+        guard attempt < policy.maxAttempts else { return false }
+        if let transferError = error as? TransferEngineError, case .connectionFailed = transferError { return true }
+        if let error = error as? NearsideError {
+            return [.connectionTimedOut, .connectionRefused, .connectionClosed, .transferInterrupted].contains(error.code)
+        }
+        return error is NWError
     }
 }
 
@@ -124,6 +147,7 @@ public final class TransferEngine: @unchecked Sendable {
         to device: NearsideDevice,
         senderId: String,
         retryPolicy: RetryPolicy = .default,
+        trustStore: PinnedTrustStore? = nil,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         completion: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
@@ -144,6 +168,7 @@ public final class TransferEngine: @unchecked Sendable {
             to: device,
             senderId: senderId,
             retryPolicy: retryPolicy,
+            trustStore: trustStore,
             onProgress: onProgress,
             completion: { result in
                 try? FileManager.default.removeItem(at: tempDir)
@@ -211,20 +236,19 @@ public final class TransferEngine: @unchecked Sendable {
         to device: NearsideDevice,
         senderId: String,
         retryPolicy: RetryPolicy = .default,
+        trustStore: PinnedTrustStore? = nil,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         completion: @escaping (Result<TransferRecord, Error>) -> Void
     ) {
         queue.async { [weak self] in
             guard let self = self else { return }
 
-            guard let hostStr = device.ipAddress, !hostStr.isEmpty else {
-                completion(.failure(TransferEngineError.connectionFailed("No IP address for peer")))
+            if let trustStore = trustStore, !trustStore.canTransfer(identity: device.fingerprint) {
+                let code: NearsideErrorCode = trustStore.isBlocked(identity: device.fingerprint) ? .trustPeerBlocked : .trustUntrustedPeer
+                completion(.failure(NearsideError(code: code, operation: "sendFiles", message: "Pair the selected peer before sending")))
                 return
             }
-
-            let portNum = device.port ?? 41433
-            let host = NWEndpoint.Host(hostStr)
-            let port = NWEndpoint.Port(rawValue: portNum) ?? NWEndpoint.Port(integerLiteral: 41433)
+            DiscoveryService.shared.ensureBrowsingActive()
 
             let manifest: TransferManifest
             do {
@@ -273,6 +297,12 @@ public final class TransferEngine: @unchecked Sendable {
             )
 
             func executeAttempt(attempt: Int) {
+                // A Bonjour service endpoint resolves fresh addresses on every connection.
+                let live = DiscoveryService.shared.discoveredEndpoint(identity: device.fingerprint)
+                guard let endpoint = PeerEndpointRecovery.endpoint(for: device, live: live) else {
+                    completion(.failure(NearsideError(code: .connectionRefused, operation: "executeAttempt", message: "Selected peer has no live endpoint", correlationId: transferId, retryCount: attempt)))
+                    return
+                }
                 NearsideLogger.shared.debug(
                     "transfer",
                     "executeAttempt",
@@ -299,15 +329,7 @@ public final class TransferEngine: @unchecked Sendable {
                     handles.append(h)
                 }
 
-                let connection: NWConnection
-                if attempt > 1 && device.platform == .android && hostStr != "127.0.0.1" {
-                    connection = NWConnection(host: NWEndpoint.Host("127.0.0.1"), port: NWEndpoint.Port(rawValue: 41435)!, using: .tcp)
-                } else if hostStr.hasPrefix("Nearside-") || (!hostStr.contains(".") && !hostStr.contains(":")) {
-                    let serviceEndpoint = NWEndpoint.service(name: hostStr, type: "_nearside._tcp", domain: "local.", interface: nil)
-                    connection = NWConnection(to: serviceEndpoint, using: .tcp)
-                } else {
-                    connection = NWConnection(host: host, port: port, using: .tcp)
-                }
+                let connection = NWConnection(to: endpoint, using: .tcp)
                 self.activeConnections[transferId] = connection
 
                 var hasCompletedOrRetried = false
@@ -326,7 +348,8 @@ public final class TransferEngine: @unchecked Sendable {
                     connection.cancel()
                     for h in handles { try? h.close() }
 
-                    if attempt < retryPolicy.maxAttempts {
+                    if PeerEndpointRecovery.shouldRetry(error: error, attempt: attempt, policy: retryPolicy) {
+                        DiscoveryService.shared.ensureBrowsingActive()
                         let delay = retryPolicy.delay(forAttempt: attempt)
                         NearsideLogger.shared.warn(
                             "transfer",
@@ -341,7 +364,7 @@ public final class TransferEngine: @unchecked Sendable {
                         self.queue.asyncAfter(deadline: .now() + delay) {
                             executeAttempt(attempt: attempt + 1)
                         }
-                    } else {
+                    } else if PeerEndpointRecovery.shouldRetry(error: error, attempt: 0, policy: retryPolicy) {
                         let finalErr = NearsideError(
                             code: .transferRetryExhausted,
                             operation: "executeAttempt",
@@ -352,6 +375,8 @@ public final class TransferEngine: @unchecked Sendable {
                         )
                         NearsideLogger.shared.error(finalErr, state: "failed")
                         completion(.failure(finalErr))
+                    } else {
+                        completion(.failure(error))
                     }
                 }
 
@@ -385,11 +410,15 @@ public final class TransferEngine: @unchecked Sendable {
                                 switch result {
                                 case .success:
                                     lock.lock()
+                                    guard !hasCompletedOrRetried else { lock.unlock(); return }
                                     hasCompletedOrRetried = true
                                     lock.unlock()
                                     self.activeConnections.removeValue(forKey: transferId)
                                     connection.cancel()
                                     for h in handles { try? h.close() }
+                                    if case let .hostPort(host, port) = connection.currentPath?.remoteEndpoint {
+                                        trustStore?.updatePeerEndpoint(identity: device.fingerprint, ip: "\(host)", port: port.rawValue)
+                                    }
                                     var finalRecord = recordTemplate
                                     finalRecord.progress = 1.0
                                     finalRecord.status = .completed
@@ -733,18 +762,15 @@ public final class TransferEngine: @unchecked Sendable {
                     }
                 }
 
-                if !trustStore.isEnrolled(identity: manifest.senderId) {
-                    let discovered = DiscoveryService.shared.findDiscoveredDevice(identity: manifest.senderId)
-                    let peerName = discovered?.name ?? "iQOO Neo9"
-                    let peerPlatform = discovered?.platform.rawValue ?? "android"
-                    let dummyKey = P256.Signing.PrivateKey().publicKey
-                    trustStore.enroll(
-                        identity: manifest.senderId,
-                        name: peerName,
-                        platform: peerPlatform,
-                        publicKey: dummyKey
-                    )
-                    NearsideLogger.shared.info("trust", "autoEnroll", "Auto-enrolled verified peer: \(peerName)", correlationId: manifest.transferId)
+                guard trustStore.canTransfer(identity: manifest.senderId) else {
+                    let blocked = trustStore.isBlocked(identity: manifest.senderId)
+                    let error = NearsideError(code: blocked ? .trustPeerBlocked : .trustUntrustedPeer,
+                        operation: "verifyTrust", message: "Sender is not permitted", correlationId: manifest.transferId)
+                    NearsideLogger.shared.error(error, state: "rejected")
+                    self.sendError(connection: connection, code: 403,
+                        reason: blocked ? "DEVICE_BLOCKED" : "DEVICE_NOT_PAIRED", detail: "Sender is not permitted")
+                    onComplete(.failure(error))
+                    return
                 }
 
                 var totalResumedBytes: Int64 = 0

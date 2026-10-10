@@ -37,6 +37,10 @@ public struct TrustedPeerRecord: Codable {
 }
 
 public final class PinnedTrustStore {
+    private struct Snapshot: Codable {
+        let records: [TrustedPeerRecord]
+        let blocked: Set<String>
+    }
     private var enrolledKeys: [String: P256.Signing.PublicKey] = [:]
     private var peerMetadata: [String: TrustedPeerRecord] = [:]
     private var blockedIdentities: Set<String> = []
@@ -161,16 +165,22 @@ public final class PinnedTrustStore {
 
     private func saveToDisk() {
         let records = Array(peerMetadata.values)
-        if let data = try? JSONEncoder().encode(records) {
+        if let data = try? JSONEncoder().encode(Snapshot(records: records, blocked: blockedIdentities)) {
             try? data.write(to: storageURL, options: .atomic)
         }
     }
 
     private func loadFromDisk() {
-        guard let data = try? Data(contentsOf: storageURL),
-              let records = try? JSONDecoder().decode([TrustedPeerRecord].self, from: data) else {
+        guard let data = try? Data(contentsOf: storageURL) else {
             return
         }
+        let records: [TrustedPeerRecord]
+        if let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
+            records = snapshot.records
+            blockedIdentities = snapshot.blocked
+        } else if let legacy = try? JSONDecoder().decode([TrustedPeerRecord].self, from: data) {
+            records = legacy
+        } else { return }
 
         for record in records {
             if record.name == "Loopback Sender" || record.identity.contains("test") {

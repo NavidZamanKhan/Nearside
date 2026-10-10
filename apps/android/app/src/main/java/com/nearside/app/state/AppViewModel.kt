@@ -245,23 +245,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
         _uiState.update { it.copy(activeTransfer = record) }
 
-        val resolved = if (device.ipAddress.isNullOrEmpty()) {
-            val disc = com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.id)
-                ?: com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.fingerprint)
-                ?: _uiState.value.discoveredDevices.firstOrNull { it.id == device.id || it.fingerprint == device.fingerprint }
-                ?: _uiState.value.discoveredDevices.firstOrNull()
-            if (disc != null && !disc.ipAddress.isNullOrEmpty()) {
-                device.copy(ipAddress = disc.ipAddress, port = disc.port)
-            } else device
-        } else device
-
-        val host = resolved.ipAddress ?: "127.0.0.1"
+        val resolved = NsdDiscoveryService.findDiscoveredDevice(device.fingerprint) ?: device
+        val host = resolved.ipAddress.orEmpty()
         viewModelScope.launch {
             val res = com.nearside.app.transfer.TransferEngine.sendFiles(
                 files = files,
                 host = host,
                 port = resolved.port ?: 41433,
                 senderId = deviceIdentity.publicIdentity,
+                peerIdentity = device.fingerprint,
+                trustStore = trustStore,
                     onProgress = { frac, _, _ -> },
                     onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                         _uiState.update { current ->
@@ -409,17 +402,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
         _uiState.update { it.copy(activeTransfer = record) }
 
-        val resolved = if (device.ipAddress.isNullOrEmpty()) {
-            val disc = com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.id)
-                ?: com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(device.fingerprint)
-                ?: _uiState.value.discoveredDevices.firstOrNull { it.id == device.id || it.fingerprint == device.fingerprint }
-                ?: _uiState.value.discoveredDevices.firstOrNull()
-            if (disc != null && !disc.ipAddress.isNullOrEmpty()) {
-                device.copy(ipAddress = disc.ipAddress, port = disc.port)
-            } else device
-        } else device
-
-        val host = resolved.ipAddress ?: "127.0.0.1"
+        val resolved = NsdDiscoveryService.findDiscoveredDevice(device.fingerprint) ?: device
+        val host = resolved.ipAddress.orEmpty()
         viewModelScope.launch {
             val res = com.nearside.app.transfer.TransferEngine.sendText(
                 text = text,
@@ -427,6 +411,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 host = host,
                 port = resolved.port ?: 41433,
                 senderId = deviceIdentity.publicIdentity,
+                peerIdentity = device.fingerprint,
+                trustStore = trustStore,
                 onProgress = { frac, _, _ -> },
                 onProgressMetrics = { frac, bytesSent, total, speed, eta ->
                     _uiState.update { current ->

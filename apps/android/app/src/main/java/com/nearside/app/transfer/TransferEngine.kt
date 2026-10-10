@@ -1,12 +1,14 @@
 package com.nearside.app.transfer
 
 import com.nearside.app.crypto.PinnedTrustStore
+import com.nearside.app.discovery.NsdDiscoveryService
 import com.nearside.app.diagnostics.*
 import com.nearside.app.model.DevicePlatform
 import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.model.TransferStatus
+import com.nearside.app.model.NearsideDevice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -28,10 +30,57 @@ data class RetryPolicy(
     val initialDelayMs: Long = 500L,
     val multiplier: Double = 2.0
 ) {
+    init {
+        require(maxAttempts in 1..10)
+        require(initialDelayMs in 0..30_000)
+        require(multiplier.isFinite() && multiplier >= 1.0)
+    }
     fun delayMs(attempt: Int): Long {
         if (attempt <= 0) return 0L
-        return (initialDelayMs * Math.pow(multiplier, (attempt - 1).toDouble())).toLong()
+        return (initialDelayMs * Math.pow(multiplier, (attempt - 1).toDouble())).toLong().coerceAtMost(30_000L)
     }
+}
+
+internal data class PeerEndpoint(val host: String, val port: Int) {
+    companion object {
+        fun fromDiscovery(identity: String, device: NearsideDevice?): PeerEndpoint? {
+            if (device == null || device.id != identity || device.fingerprint != identity) return null
+            val host = device.ipAddress?.takeIf { it.isNotBlank() } ?: return null
+            val port = device.port?.takeIf { it in 1..65535 } ?: return null
+            return PeerEndpoint(host, port)
+        }
+    }
+}
+
+/** Discovery is an address hint for one identity; it never enrolls or changes a peer key. */
+internal suspend fun <T> retryPeerEndpoint(
+    initial: PeerEndpoint,
+    policy: RetryPolicy,
+    latest: () -> PeerEndpoint?,
+    refresh: suspend () -> PeerEndpoint?,
+    send: suspend (PeerEndpoint) -> Result<T>,
+    onRetry: (Int, Exception) -> Unit = { _, _ -> },
+    onSuccess: (PeerEndpoint) -> Unit = {},
+    pause: suspend (Long) -> Unit = { delay(it) }
+): Result<T> {
+    var endpoint = latest() ?: initial
+    var lastError: Exception? = null
+    for (attempt in 1..policy.maxAttempts) {
+        try {
+            val result = send(endpoint)
+            if (result.isSuccess) onSuccess(endpoint)
+            // Protocol/trust rejection is terminal. Only native transport failures retry.
+            return result
+        } catch (error: java.io.IOException) {
+            lastError = error
+            if (attempt < policy.maxAttempts) {
+                onRetry(attempt, error)
+                endpoint = refresh() ?: latest() ?: endpoint
+                pause(policy.delayMs(attempt))
+            }
+        }
+    }
+    return Result.failure(lastError ?: java.io.IOException("Peer endpoint retries exhausted"))
 }
 
 object TransferEngine {
@@ -146,32 +195,17 @@ object TransferEngine {
         port: Int = 41433,
         senderId: String,
         retryPolicy: RetryPolicy = RetryPolicy(),
+        peerIdentity: String? = null,
+        trustStore: PinnedTrustStore? = null,
         onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
         val (manifest, tempFile) = buildTextManifest(text, isUrl, senderId)
         try {
-            var lastException: Exception? = null
-            for (attempt in 1..retryPolicy.maxAttempts) {
-                try {
-                    return@withContext performSendAttempt(
-                        files = listOf(tempFile),
-                        manifest = manifest,
-                        host = host,
-                        port = port,
-                        onProgress = onProgress,
-                        onProgressMetrics = onProgressMetrics
-                    )
-                } catch (e: Exception) {
-                    lastException = e
-                    if (attempt < retryPolicy.maxAttempts) {
-                        delay(retryPolicy.delayMs(attempt))
-                    }
-                }
-            }
-            Result.failure(lastException ?: IllegalStateException("Failed to send text after ${retryPolicy.maxAttempts} attempts"))
+            sendManifest(listOf(tempFile), manifest, host, port, senderId, retryPolicy,
+                peerIdentity, trustStore, onProgress, onProgressMetrics)
         } finally {
-            try { tempFile.delete() } catch (ignored: Exception) {}
+            tempFile.delete()
         }
     }
 
@@ -181,68 +215,70 @@ object TransferEngine {
         port: Int = 41433,
         senderId: String,
         retryPolicy: RetryPolicy = RetryPolicy(),
+        peerIdentity: String? = null,
+        trustStore: PinnedTrustStore? = null,
         onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> = withContext(Dispatchers.IO) {
         val manifest = buildManifest(files, senderId)
-        var lastException: Exception? = null
+        sendManifest(files, manifest, host, port, senderId, retryPolicy,
+            peerIdentity, trustStore, onProgress, onProgressMetrics)
+    }
 
-        NearsideLogger.info(
-            subsystem = "transfer",
-            operation = "sendFiles",
-            message = "Starting outbound transfer with ${files.size} file(s)",
-            state = "starting",
-            correlationId = manifest.transferId,
-            metadata = mapOf(
-                "totalBytes" to "${manifest.totalBytes}",
-                "destination" to "$host:$port"
-            )
-        )
-
-        for (attempt in 1..retryPolicy.maxAttempts) {
-            try {
-                NearsideLogger.debug(
-                    subsystem = "transfer",
-                    operation = "performSendAttempt",
-                    message = "Beginning connection attempt $attempt/${retryPolicy.maxAttempts}",
-                    state = "connecting",
-                    correlationId = manifest.transferId
-                )
-                return@withContext performSendAttempt(
-                    files = files,
-                    manifest = manifest,
-                    host = host,
-                    port = port,
-                    onProgress = onProgress,
-                    onProgressMetrics = onProgressMetrics
-                )
-            } catch (e: Exception) {
-                lastException = e
-                if (attempt < retryPolicy.maxAttempts) {
-                    val delay = retryPolicy.delayMs(attempt)
-                    NearsideLogger.warn(
-                        subsystem = "transfer",
-                        operation = "performSendAttempt",
-                        message = "Attempt $attempt failed, scheduling retry in ${delay}ms",
-                        state = "retrying",
-                        correlationId = manifest.transferId,
-                        retryCount = attempt,
-                        underlyingError = e
-                    )
-                    delay(delay)
-                }
-            }
+    private suspend fun sendManifest(
+        files: List<File>,
+        manifest: TransferManifest,
+        host: String,
+        port: Int,
+        senderId: String,
+        retryPolicy: RetryPolicy,
+        peerIdentity: String?,
+        trustStore: PinnedTrustStore?,
+        onProgress: (Float, Long, Long) -> Unit,
+        onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)?
+    ): Result<TransferManifest> {
+        if (peerIdentity != null && trustStore?.canTransfer(peerIdentity) != true) {
+            val code = if (trustStore?.isBlocked(peerIdentity) == true)
+                NearsideErrorCode.TRUST_PEER_BLOCKED else NearsideErrorCode.TRUST_UNTRUSTED_PEER
+            return Result.failure(NearsideError(code, "sendFiles", "Pair the selected peer before sending",
+                correlationId = manifest.transferId))
         }
-        val finalErr = NearsideError(
-            code = NearsideErrorCode.TRANSFER_RETRY_EXHAUSTED,
-            operation = "sendFiles",
-            message = "Outbound transfer exhausted all ${retryPolicy.maxAttempts} attempts",
-            underlyingError = lastException,
-            correlationId = manifest.transferId,
-            retryCount = retryPolicy.maxAttempts
+        val latest = {
+            peerIdentity?.let { PeerEndpoint.fromDiscovery(it, NsdDiscoveryService.findDiscoveredDevice(it)) }
+        }
+        if (host.isBlank() && latest() == null) {
+            return Result.failure(NearsideError(NearsideErrorCode.CONNECTION_REFUSED, "sendFiles",
+                "Selected peer has no live endpoint", correlationId = manifest.transferId))
+        }
+        NearsideLogger.info("transfer", "sendFiles", "Starting outbound transfer with ${files.size} file(s)",
+            state = "starting", correlationId = manifest.transferId,
+            metadata = mapOf("totalBytes" to "${manifest.totalBytes}"))
+        val result = retryPeerEndpoint(
+            initial = PeerEndpoint(host, port),
+            policy = retryPolicy,
+            latest = latest,
+            refresh = {
+                peerIdentity?.let { PeerEndpoint.fromDiscovery(it, NsdDiscoveryService.refreshDiscoveredDevice(it)) }
+            },
+            send = { endpoint ->
+                performSendAttempt(files, manifest, endpoint.host, endpoint.port, onProgress, onProgressMetrics)
+            },
+            onRetry = { attempt, error ->
+                NearsideLogger.warn("connection", "refreshPeerEndpoint", "Refreshing selected peer endpoint before retry",
+                    state = "retrying", correlationId = manifest.transferId, retryCount = attempt,
+                    underlyingError = error)
+            },
+            onSuccess = { endpoint ->
+                if (peerIdentity != null) trustStore?.updatePeerEndpoint(peerIdentity, endpoint.host, endpoint.port)
+            }
         )
-        NearsideLogger.error(finalErr, state = "failed")
-        Result.failure(finalErr)
+        val error = result.exceptionOrNull()
+        if (error !is java.io.IOException) return result
+        val finalError = NearsideError(NearsideErrorCode.TRANSFER_RETRY_EXHAUSTED, "sendFiles",
+            "Outbound transfer exhausted all ${retryPolicy.maxAttempts} attempts", underlyingError = error,
+            correlationId = manifest.transferId, retryCount = retryPolicy.maxAttempts)
+        NearsideLogger.error(finalError, state = "failed")
+        return Result.failure(finalError)
     }
 
     private fun performSendAttempt(
@@ -253,33 +289,15 @@ object TransferEngine {
         onProgress: (Float, Long, Long) -> Unit,
         onProgressMetrics: ((Float, Long, Long, Double, Long?) -> Unit)? = null
     ): Result<TransferManifest> {
-        val candidates = mutableListOf<Pair<String, Int>>()
-        candidates.add(Pair(host, port))
-        if (host != "127.0.0.1" && host != "localhost") {
-            candidates.add(Pair("127.0.0.1", 41434))
-            candidates.add(Pair("127.0.0.1", 41433))
-            candidates.add(Pair("10.0.2.2", 41433))
+        val socket = Socket()
+        try {
+            socket.tcpNoDelay = true
+            socket.soTimeout = 15000
+            socket.connect(java.net.InetSocketAddress(host, port), 3000)
+        } catch (error: Exception) {
+            socket.close()
+            throw error
         }
-
-        var connectedSocket: Socket? = null
-        var connectedTarget: String = "$host:$port"
-        var connectError: Exception? = null
-
-        for ((targetHost, targetPort) in candidates.distinct()) {
-            try {
-                val sock = Socket()
-                sock.tcpNoDelay = true
-                sock.soTimeout = 15000
-                sock.connect(java.net.InetSocketAddress(targetHost, targetPort), 3000)
-                connectedSocket = sock
-                connectedTarget = "$targetHost:$targetPort"
-                break
-            } catch (e: Exception) {
-                connectError = e
-            }
-        }
-
-        val socket = connectedSocket ?: throw (connectError ?: java.io.IOException("Failed to connect to any endpoint for $host:$port"))
         socket.use {
             val out = DataOutputStream(socket.getOutputStream())
             val input = DataInputStream(socket.getInputStream())
@@ -287,7 +305,7 @@ object TransferEngine {
             NearsideLogger.info(
                 subsystem = "connection",
                 operation = "performSendAttempt",
-                message = "TCP socket connected to $connectedTarget",
+                message = "TCP socket connected to selected peer",
                 state = "transferring",
                 correlationId = manifest.transferId
             )
@@ -510,32 +528,22 @@ object TransferEngine {
                 }
             }
 
-            // Validate against trust store
-            if (!trustStore.isEnrolled(manifest.senderId)) {
-                val discovered = com.nearside.app.discovery.NsdDiscoveryService.findDiscoveredDevice(manifest.senderId)
-                if (discovered != null) {
-                    val dummyKey = com.nearside.app.crypto.DeviceIdentity.generateEphemeral().publicKey
-                    trustStore.enroll(
-                        identity = manifest.senderId,
-                        name = discovered.name,
-                        platform = discovered.platform.name.lowercase(),
-                        publicKey = dummyKey
-                    )
-                    NearsideLogger.info("trust", "autoEnroll", "Auto-enrolled verified local Wi-Fi peer: ${discovered.name}", correlationId = manifest.transferId)
-                } else {
-                    val err = ErrorFrame(403, "DEVICE_NOT_PAIRED", "Sender ${manifest.senderId} is not in trust store")
-                    val errBytes = err.toJson().toString().toByteArray(Charsets.UTF_8)
-                    val errH = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
-                    errH.putInt(TransferChunk.MAGIC)
-                    errH.put(FrameType.ERROR.code)
-                    errH.putInt(errBytes.size)
-                    out.write(errH.array())
-                    out.write(errBytes)
-                    out.flush()
-                    val nsErr = NearsideError(NearsideErrorCode.TRUST_UNTRUSTED_PEER, "verifyTrust", "Untrusted sender: ${NearsideRedactor.sanitizeIdentity(manifest.senderId)}", correlationId = manifest.transferId)
-                    NearsideLogger.error(nsErr, state = "rejected")
-                    return@withContext Result.failure(nsErr)
-                }
+            // Discovery cannot grant trust or bypass a user block.
+            if (!trustStore.canTransfer(manifest.senderId)) {
+                val blocked = trustStore.isBlocked(manifest.senderId)
+                val err = ErrorFrame(403, if (blocked) "DEVICE_BLOCKED" else "DEVICE_NOT_PAIRED", "Sender is not permitted")
+                val errBytes = err.toJson().toString().toByteArray(Charsets.UTF_8)
+                val errH = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN)
+                errH.putInt(TransferChunk.MAGIC)
+                errH.put(FrameType.ERROR.code)
+                errH.putInt(errBytes.size)
+                out.write(errH.array())
+                out.write(errBytes)
+                out.flush()
+                val nsErr = NearsideError(if (blocked) NearsideErrorCode.TRUST_PEER_BLOCKED else NearsideErrorCode.TRUST_UNTRUSTED_PEER,
+                    "verifyTrust", "Sender is not permitted", correlationId = manifest.transferId)
+                NearsideLogger.error(nsErr, state = "rejected")
+                return@withContext Result.failure(nsErr)
             }
 
             var totalResumed = 0L

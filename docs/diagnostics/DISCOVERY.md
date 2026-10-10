@@ -46,3 +46,14 @@ carry a `disc_` correlation ID and safe native error information. DNS-SD host an
 resolution take precedence over advertised TXT IP hints. Stopping/restarting discovery
 clears the global endpoint cache. Apple callbacks from superseded browsers are ignored,
 and service endpoints remain available for fresh DNS resolution on each connection.
+
+Android also invalidates service aliases and pending resolutions when its default network
+or link addresses change. It restarts browsing and refreshes advertisement after a 300 ms
+debounce; loss clears the visible/global cache immediately. The network callback is
+unregistered when discovery stops. `NS-DISC-002` reports unavailable network monitoring.
+
+Resolution waits are capped at three seconds for the visible cache. Android 14+ cancels
+native resolution when stopping or timing out. Older Android versions retain the native
+in-flight slot until its terminal callback, while discarding its stale registration data,
+to avoid flooding subsequent peers with `ALREADY_ACTIVE` errors. Transfer discovery
+refresh still has its own two-second deadline on every supported version.

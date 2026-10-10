@@ -70,3 +70,13 @@ For early inbound connections before manifest exchange, `connectionId` (formatte
    - Identify the attempt number (`retryCount=...`).
    - Inspect the `underlying` description for native OS socket errors (`POSIXError: Connection reset by peer` or `SocketTimeoutException`).
 4. **Inspect Resume Checkpoint**: If a retry occurred, check whether the receiver acknowledged partial bytes (`bytesReceived=...`).
+
+## 6. Endpoint Recovery
+
+Live discovery for the selected persistent identity takes precedence over its saved address. Android re-resolves active service registrations after a transport failure, with a two-second discovery deadline. Apple connects using the current Bonjour service endpoint so DNS-SD resolves its address on each attempt. A service lost during resolution cannot replace an active identity record.
+
+Only the selected identity is considered; display names, an arbitrary nearby device, localhost ports, and emulator addresses are never recovery candidates. Discovery supplies address hints and cannot enroll a peer or replace its pinned key. Receiver and sender trust checks enforce user blocks. Missing endpoints produce `NS-CONN-002`, and transport retry exhaustion produces `NS-TRANSFER-003` with the original native error, transfer correlation ID, and retry count. Protocol, integrity, trust, and cancellation failures are terminal.
+
+The default retry limit is three attempts, with at most ten allowed by configuration and a thirty-second ceiling on backoff. A completed transfer updates endpoint metadata without changing the enrolled identity or public key. macOS persists blocked identities alongside trust records and accepts the previous records-only storage format.
+
+For manual validation, pair the devices, transfer a small file, change the recipient's Wi-Fi/DHCP address, and send again from the existing paired-device entry. Confirm one recipient identity remains, the new address is used, and the file checksum matches. Repeat with the recipient offline to confirm bounded failure; block the recipient and verify discovery cannot restore transfer permission.

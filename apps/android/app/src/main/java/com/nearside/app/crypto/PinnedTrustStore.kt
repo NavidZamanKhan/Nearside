@@ -70,11 +70,11 @@ class PinnedTrustStore(private val storageFile: File? = null) {
     fun updatePeerEndpoint(identity: String, ip: String?, port: Int?) {
         val record = peerMetadata[identity] ?: return
         var changed = false
-        if (!ip.isNullOrEmpty() && record.lastKnownIp != ip) {
+        if (!ip.isNullOrBlank() && record.lastKnownIp != ip) {
             record.lastKnownIp = ip
             changed = true
         }
-        if (port != null && port > 0 && record.lastKnownPort != port) {
+        if (port != null && port in 1..65535 && record.lastKnownPort != port) {
             record.lastKnownPort = port
             changed = true
         }
@@ -98,6 +98,10 @@ class PinnedTrustStore(private val storageFile: File? = null) {
     }
 
     fun isEnrolled(identity: String): Boolean = enrolledKeys.containsKey(identity)
+
+    fun isBlocked(identity: String): Boolean = blockedIdentities.contains(identity)
+
+    fun canTransfer(identity: String): Boolean = isEnrolled(identity) && !isBlocked(identity)
 
     fun allEnrolledPeers(): List<TrustedPeerRecord> = peerMetadata.values.toList()
 

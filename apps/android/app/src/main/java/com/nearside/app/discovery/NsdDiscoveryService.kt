@@ -1,8 +1,12 @@
 package com.nearside.app.discovery
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.LinkProperties
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -49,6 +53,75 @@ class NsdDiscoveryService(context: Context) {
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
+    private val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var observedNetwork: Network? = null
+    private var observedAddresses = emptyList<String>()
+    private var discoveryRequested = false
+    private var advertisedPort = 41433
+    private val restartOnNetworkChange = Runnable {
+        if (discoveryRequested) {
+            val advertised = registrationListener != null
+            startDiscoveryOnMain()
+            if (advertised) startAdvertising(localIdentity, localDeviceName, advertisedPort, isReceivingActive)
+        }
+    }
+
+    private fun monitorNetwork() {
+        if (networkCallback != null) return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (!discoveryRequested) return
+                if (observedNetwork != network) {
+                    observedNetwork = network
+                    observedAddresses = emptyList()
+                    scheduleNetworkRestart()
+                }
+            }
+            override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+                if (!discoveryRequested || observedNetwork != network) return
+                val addresses = properties.linkAddresses.map { it.toString() }.sorted()
+                if (addresses != observedAddresses) {
+                    observedAddresses = addresses
+                    scheduleNetworkRestart()
+                }
+            }
+            override fun onLost(network: Network) {
+                if (!discoveryRequested || observedNetwork != network) return
+                observedNetwork = null
+                observedAddresses = emptyList()
+                handler.removeCallbacks(restartOnNetworkChange)
+                stopDiscoveryOnMain()
+            }
+        }
+        try {
+            connectivity.registerDefaultNetworkCallback(callback, handler)
+            networkCallback = callback
+        } catch (error: RuntimeException) {
+            NearsideLogger.warn("discovery", "monitorNetwork", "Network change monitoring unavailable", state = "browsing", errorCode = NearsideErrorCode.DISCOVERY_BROWSER_FAILED, underlyingError = error)
+        }
+    }
+
+    private fun scheduleNetworkRestart() {
+        // Immediately invalidate old addresses and late resolution callbacks, then debounce OS events.
+        stopDiscoveryOnMain()
+        handler.removeCallbacks(restartOnNetworkChange)
+        handler.postDelayed(restartOnNetworkChange, 300)
+    }
+
+    private fun stopNetworkMonitor() {
+        handler.removeCallbacks(restartOnNetworkChange)
+        networkCallback?.let { callback ->
+            try { connectivity.unregisterNetworkCallback(callback) }
+            catch (error: RuntimeException) {
+                NearsideLogger.warn("discovery", "stopNetworkMonitor", "Unable to release network callback", underlyingError = error)
+            }
+        }
+        networkCallback = null
+        observedNetwork = null
+        observedAddresses = emptyList()
+    }
+
     private var localIdentity: String = ""
     private var localDeviceName: String = ""
     private var isReceivingActive: Boolean = true
@@ -58,6 +131,38 @@ class NsdDiscoveryService(context: Context) {
     private val activeServices = mutableMapOf<String, NsdServiceInfo>()
     private val pendingResolutions = ArrayDeque<Pair<NsdServiceInfo, Long>>()
     private var resolving = false
+    private var activeResolutionToken: Long? = null
+    private var activeResolveListener: NsdManager.ResolveListener? = null
+    private var resolutionDeadline: Runnable? = null
+
+    private fun finishResolution(token: Long): Boolean {
+        if (activeResolutionToken != token) return false
+        resolutionDeadline?.let { handler.removeCallbacks(it) }
+        resolutionDeadline = null
+        activeResolutionToken = null
+        activeResolveListener = null
+        resolving = false
+        return true
+    }
+
+    private fun cancelResolution() {
+        val token = activeResolutionToken ?: return
+        val listener = activeResolveListener
+        if (Build.VERSION.SDK_INT < 34) {
+            // These OS versions cannot cancel a native resolution. Keep its slot until the
+            // terminal callback, so queued peers aren't rejected with ALREADY_ACTIVE.
+            resolutionDeadline?.let { handler.removeCallbacks(it) }
+            resolutionDeadline = null
+            return
+        }
+        finishResolution(token)
+        if (listener != null) {
+            try { nsdManager.stopServiceResolution(listener) }
+            catch (error: RuntimeException) {
+                NearsideLogger.debug("discovery", "cancelResolution", "Resolution already finished", correlationId = "disc_$token")
+            }
+        }
+    }
     private var discoveryGeneration = 0L
     private var lastSeenTime = 0L
 
@@ -79,6 +184,11 @@ class NsdDiscoveryService(context: Context) {
         port: Int = 41433,
         isReceiving: Boolean = true
     ) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { startAdvertising(identity, deviceName, port, isReceiving) }
+            return
+        }
+        this.advertisedPort = port
         this.localIdentity = identity
         this.localDeviceName = deviceName
         this.isReceivingActive = isReceiving
@@ -135,6 +245,10 @@ class NsdDiscoveryService(context: Context) {
     }
 
     fun stopAdvertising() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { stopAdvertising() }
+            return
+        }
         registrationListener?.let { listener ->
             try {
                 nsdManager.unregisterService(listener)
@@ -145,7 +259,11 @@ class NsdDiscoveryService(context: Context) {
         }
     }
 
-    fun startDiscovery() = handler.post { startDiscoveryOnMain() }
+    fun startDiscovery() = handler.post {
+        discoveryRequested = true
+        monitorNetwork()
+        startDiscoveryOnMain()
+    }
 
     private fun startDiscoveryOnMain() {
         stopDiscoveryOnMain()
@@ -220,20 +338,22 @@ class NsdDiscoveryService(context: Context) {
         val (serviceInfo, token) = pendingResolutions.removeFirst()
         if (!activeServices.containsKey(serviceKey(serviceInfo))) { resolveNextService(); return }
         resolving = true
+        activeResolutionToken = token
         val resolveListener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(service: NsdServiceInfo, errorCode: Int) {
                 Log.w(TAG, "Resolve failed for ${service.serviceName}: $errorCode")
                 NearsideLogger.warn("discovery", "resolveService", "Service resolution failed", state = "resolving", correlationId = "disc_$token", errorCode = NearsideErrorCode.DISCOVERY_RESOLVE_FAILED, metadata = mapOf("nativeCode" to errorCode.toString()))
                 handler.post {
-                    registry.discard(serviceKey(serviceInfo), token)
-                    publishDevices()
-                    resolving = false
-                    resolveNextService()
+                    if (finishResolution(token)) {
+                        registry.discard(serviceKey(serviceInfo), token)
+                        publishDevices()
+                        resolveNextService()
+                    }
                 }
             }
 
             override fun onServiceResolved(service: NsdServiceInfo) { handler.post {
-                resolving = false
+                if (!finishResolution(token)) return@post
                 resolveNextService()
                 val attributes = service.attributes
                 val idAttr = attributes["id"]?.let { String(it, Charsets.UTF_8) }
@@ -287,10 +407,22 @@ class NsdDiscoveryService(context: Context) {
             } }
         }
 
+        activeResolveListener = resolveListener
+        val deadline = Runnable {
+            if (activeResolutionToken == token) {
+                cancelResolution()
+                registry.discard(serviceKey(serviceInfo), token)
+                publishDevices()
+                NearsideLogger.warn("discovery", "resolveService", "Service resolution timed out", state = "failed", correlationId = "disc_$token", errorCode = NearsideErrorCode.DISCOVERY_RESOLVE_FAILED)
+                resolveNextService()
+            }
+        }
+        resolutionDeadline = deadline
+        handler.postDelayed(deadline, 3000)
         try {
             nsdManager.resolveService(serviceInfo, resolveListener)
         } catch (e: Exception) {
-            resolving = false
+            finishResolution(token)
             registry.discard(serviceKey(serviceInfo), token)
             publishDevices()
             NearsideLogger.warn("discovery", "resolveService", "Unable to start service resolution", state = "failed", correlationId = "disc_$token", errorCode = NearsideErrorCode.DISCOVERY_RESOLVE_FAILED, underlyingError = e)
@@ -298,10 +430,15 @@ class NsdDiscoveryService(context: Context) {
         }
     }
 
-    fun stopDiscovery() = handler.post { stopDiscoveryOnMain() }
+    fun stopDiscovery() = handler.post {
+        discoveryRequested = false
+        stopNetworkMonitor()
+        stopDiscoveryOnMain()
+    }
 
     private fun stopDiscoveryOnMain() {
         discoveryGeneration++
+        cancelResolution()
         activeServices.clear()
         pendingResolutions.clear()
         registry.clear()

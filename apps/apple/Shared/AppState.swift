@@ -311,14 +311,12 @@ public final class AppState: ObservableObject {
     public func sendFiles(urls: [URL], to device: NearsideDevice) {
         guard !urls.isEmpty else { return }
 
-        var targetDevice = device
-        if targetDevice.ipAddress == nil || targetDevice.ipAddress?.isEmpty == true {
-            if let disc = DiscoveryService.shared.findDiscoveredDevice(identity: device.id) {
-                targetDevice = disc
-            }
-        }
-        if !trustStore.isEnrolled(identity: targetDevice.id) {
-            pairDiscoveredDevice(targetDevice)
+        let targetDevice = device
+        guard trustStore.canTransfer(identity: device.fingerprint) else {
+            let error = NearsideError(code: trustStore.isBlocked(identity: device.fingerprint) ? .trustPeerBlocked : .trustUntrustedPeer,
+                operation: "sendFiles", message: "Pair the selected device before sending")
+            NearsideLogger.shared.error(error, state: "rejected")
+            return
         }
 
         let firstFilename = urls.first?.lastPathComponent ?? "Files"
@@ -340,7 +338,7 @@ public final class AppState: ObservableObject {
         )
         self.activeTransfer = record
 
-        if let ip = targetDevice.ipAddress, !ip.isEmpty {
+        do {
             DiscoveryService.shared.ensureBrowsingActive()
             var lastSampleTime = Date()
             var lastSampleBytes: Int64 = 0
@@ -348,7 +346,8 @@ public final class AppState: ObservableObject {
             TransferEngine.shared.sendFiles(
                 files: urls,
                 to: targetDevice,
-                senderId: localFingerprint,
+                senderId: deviceIdentity.publicIdentity,
+                trustStore: trustStore,
                 onProgress: { [weak self] fraction, transferred, total in
                     Task { @MainActor in
                         let now = Date()
@@ -390,9 +389,6 @@ public final class AppState: ObservableObject {
                     }
                 }
             )
-        } else {
-            // Fallback to simulation if IP is unresolvable
-            simulateOutgoingTransfer(to: device, filenames: urls.map { $0.lastPathComponent }, totalBytes: totalBytes)
         }
     }
 
@@ -431,6 +427,11 @@ public final class AppState: ObservableObject {
     }
 
     public func sendClipboard(to device: NearsideDevice) {
+        guard trustStore.canTransfer(identity: device.fingerprint) else {
+            NearsideLogger.shared.error(NearsideError(code: trustStore.isBlocked(identity: device.fingerprint) ? .trustPeerBlocked : .trustUntrustedPeer,
+                operation: "sendClipboard", message: "Pair the selected device before sending"), state: "rejected")
+            return
+        }
         let text: String?
         #if os(macOS)
         text = NSPasteboard.general.string(forType: .string)
@@ -467,12 +468,13 @@ public final class AppState: ObservableObject {
         )
         self.activeTransfer = record
 
-        if let ip = device.ipAddress, !ip.isEmpty {
+        do {
             TransferEngine.shared.sendText(
                 text: payload,
                 isURL: isURL,
                 to: device,
-                senderId: localFingerprint,
+                senderId: deviceIdentity.publicIdentity,
+                trustStore: trustStore,
                 onProgress: { [weak self] fraction, transferred, total in
                     Task { @MainActor in
                         self?.activeTransfer?.progress = fraction
@@ -494,8 +496,6 @@ public final class AppState: ObservableObject {
                     }
                 }
             )
-        } else {
-            simulateOutgoingTransfer(to: device, filenames: [displayFilename], totalBytes: Int64(payload.utf8.count))
         }
     }
 }

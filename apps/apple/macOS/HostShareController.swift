@@ -73,7 +73,7 @@ final class HostShareController: NSObject, NSWindowDelegate, ObservableObject {
         progress = 0
         errorMessage = nil
         TransferEngine.shared.sendFiles(files: imported.files, to: device,
-            senderId: state.deviceIdentity.publicIdentity,
+            senderId: state.deviceIdentity.publicIdentity, trustStore: state.trustStore,
             onProgress: { [weak self] fraction, _, _ in
                 Task { @MainActor in self?.progress = fraction }
             }, completion: { [weak self] result in
