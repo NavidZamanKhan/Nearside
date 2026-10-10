@@ -31,23 +31,39 @@ public struct DeviceIdentity {
     }
 
     public static func loadOrCreatePersistent() throws -> DeviceIdentity {
-        let tag = Data("com.nearside.identity.p256".utf8)
+        let service = "com.nearside.app.identity"
+        let account = "p256"
         let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true
         ]
         return try loadOrCreatePersistent(readKey: {
             var item: CFTypeRef?
             let status = SecItemCopyMatching(query as CFDictionary, &item)
-            return (status, item as? Data)
+            if status == errSecSuccess {
+                return (status, item as? Data)
+            }
+            let legacyTag = Data("com.nearside.identity.p256".utf8)
+            let legacyQuery: [String: Any] = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: legacyTag,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+                kSecReturnData as String: true
+            ]
+            var legacyItem: CFTypeRef?
+            let legacyStatus = SecItemCopyMatching(legacyQuery as CFDictionary, &legacyItem)
+            if legacyStatus == errSecSuccess {
+                return (legacyStatus, legacyItem as? Data)
+            }
+            return (status, nil)
         }, addKey: { data in
             let addQuery: [String: Any] = [
-                kSecClass as String: kSecClassKey,
-                kSecAttrApplicationTag as String: tag,
-                kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             ]
