@@ -129,19 +129,49 @@ private struct HostSharePicker: View {
             } else if !controller.completed {
                 if state.pairedDevices.isEmpty {
                     Text("Pair a device in Nearside, then return to this window.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .padding(.vertical, 16)
+                } else if state.onlineTransferRecipients.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No paired devices are currently online on Wi-Fi.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Text("Make sure Nearside is running on your phone and connected to the same Wi-Fi network.")
+                            .font(.caption)
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 16)
                 } else {
                     ScrollView {
                         VStack(spacing: 8) {
-                            ForEach(state.pairedDevices.filter { state.trustStore.canTransfer(identity: $0.id) }) { device in
+                            ForEach(state.onlineTransferRecipients) { device in
                                 Button {
                                     controller.send(to: device)
                                 } label: {
-                                    HStack {
+                                    HStack(spacing: 10) {
                                         Image(systemName: device.platform.systemSymbolName)
-                                        Text(device.name)
+                                            .font(.system(size: 16))
+                                            .foregroundColor(.accentColor)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(device.name)
+                                                .font(.system(size: 13, weight: .medium))
+                                            HStack(spacing: 4) {
+                                                Circle()
+                                                    .fill(Color.green)
+                                                    .frame(width: 6, height: 6)
+                                                Text("Online • \(device.shortFingerprint)")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
                                         Spacer()
-                                        Text("Send").foregroundStyle(.secondary)
-                                    }.padding(8)
+                                        Text("Send")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(.accentColor)
+                                    }
+                                    .padding(8)
                                 }
                                 .buttonStyle(.bordered)
                             }

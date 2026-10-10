@@ -277,10 +277,21 @@ public struct MenuBarShelfView: View {
         )
     }
 
+    private var displayPairedDevices: [NearsideDevice] {
+        let onlineDevices = appState.onlineTransferRecipients
+        return appState.pairedDevices.filter { device in
+            if device.reachability == .online { return true }
+            let hasOnlineSameName = onlineDevices.contains {
+                $0.name.lowercased() == device.name.lowercased() && $0.platform == device.platform
+            }
+            return !hasOnlineSameName
+        }
+    }
+
     private var trustedDevicesSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeading("TRUSTED DEVICES", count: appState.pairedDevices.count)
-            if appState.pairedDevices.isEmpty {
+            sectionHeading("TRUSTED DEVICES", count: displayPairedDevices.count)
+            if displayPairedDevices.isEmpty {
                 Text("No paired devices yet")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -288,7 +299,7 @@ public struct MenuBarShelfView: View {
                     .padding(.vertical, 8)
             } else {
                 VStack(spacing: 4) {
-                    ForEach(appState.pairedDevices) { device in
+                    ForEach(displayPairedDevices) { device in
                         DeviceRowView(device: device, isTrusted: true,
                             isBlocked: appState.trustStore.isBlocked(identity: device.fingerprint),
                             canSend: appState.onlineTransferRecipients.contains { $0.fingerprint == device.fingerprint },

@@ -208,9 +208,13 @@ class PinnedTrustStore(private val storageFile: File? = null) {
         val file = storageFile ?: return
         if (!file.exists()) return
         try {
-            val root = JSONObject(file.readText(Charsets.UTF_8))
-            val records = root.getJSONArray("records")
-            val blocked = if (root.has("blocked")) root.getJSONArray("blocked") else JSONArray()
+            val rawText = file.readText(Charsets.UTF_8).trim()
+            val (records, blocked) = if (rawText.startsWith("[")) {
+                JSONArray(rawText) to JSONArray()
+            } else {
+                val root = JSONObject(rawText)
+                root.getJSONArray("records") to (if (root.has("blocked")) root.getJSONArray("blocked") else JSONArray())
+            }
             val keys = mutableMapOf<String, PublicKey>()
             val metadata = mutableMapOf<String, TrustedPeerRecord>()
             val blocks = mutableSetOf<String>()
@@ -225,8 +229,10 @@ class PinnedTrustStore(private val storageFile: File? = null) {
                         "Trust storage contains an invalid peer record. Existing data was preserved")
                 }
                 keys[identity] = publicKey
+                val enrolledMillis = if (obj.has("enrolledAtMillis")) obj.getLong("enrolledAtMillis")
+                    else (obj.optDouble("enrolledAt", 0.0) * 1000).toLong()
                 metadata[identity] = TrustedPeerRecord(identity, obj.getString("name"), obj.getString("platformRaw"),
-                    spkiBase64, obj.getLong("enrolledAtMillis"),
+                    spkiBase64, enrolledMillis,
                     if (obj.has("lastKnownIp")) obj.getString("lastKnownIp").takeIf { it.isNotEmpty() } else null,
                     if (obj.has("lastKnownPort")) obj.getInt("lastKnownPort").takeIf { it in 1..65535 } else null)
             }
