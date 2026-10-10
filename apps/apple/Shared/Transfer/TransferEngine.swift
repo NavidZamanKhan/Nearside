@@ -347,10 +347,23 @@ public final class TransferEngine: @unchecked Sendable {
                 ]
             )
 
+            var targetDevice = device
+            if (targetDevice.ipAddress == nil || targetDevice.ipAddress?.isEmpty == true),
+               let trusted = trustStore.allEnrolledPeers().first(where: { $0.identity == device.fingerprint }),
+               let lastIp = trusted.lastKnownIp, !lastIp.isEmpty {
+                targetDevice.ipAddress = lastIp
+                if let lastPort = trusted.lastKnownPort {
+                    targetDevice.port = lastPort
+                }
+            }
+
             func executeAttempt(attempt: Int) {
-                // A Bonjour service endpoint resolves fresh addresses on every connection.
-                let live = DiscoveryService.shared.discoveredEndpoint(identity: device.fingerprint)
-                guard let endpoint = PeerEndpointRecovery.endpoint(for: device, live: live) else {
+                // On attempt 1, try live Bonjour endpoint if available.
+                // On retry attempts (attempt > 1), pass live: nil so PeerEndpointRecovery falls back to the direct hostPort IP, bypassing stalled mDNS/IPv6 resolution.
+                let live = (attempt == 1) ? DiscoveryService.shared.discoveredEndpoint(identity: targetDevice.fingerprint) : nil
+                guard let endpoint = PeerEndpointRecovery.endpoint(for: targetDevice, live: live)
+                    ?? PeerEndpointRecovery.endpoint(for: targetDevice, live: nil)
+                    ?? DiscoveryService.shared.discoveredEndpoint(identity: targetDevice.fingerprint) else {
                     let failure = NearsideError(code: .connectionRefused, operation: "refreshPeerEndpoint", message: "Selected peer has no live endpoint", correlationId: transferId, retryCount: attempt)
                     if attempt < retryPolicy.maxAttempts {
                         NearsideLogger.shared.warn("connection", "refreshPeerEndpoint", "Waiting for selected peer discovery", state: "retrying", correlationId: transferId, errorCode: .connectionRefused, retryCount: attempt)
@@ -390,11 +403,15 @@ public final class TransferEngine: @unchecked Sendable {
                     handles.append(h)
                 }
 
-                let connection = NWConnection(to: endpoint, using: .tcp)
+                let tcpOptions = NWProtocolTCP.Options()
+                tcpOptions.noDelay = true
+                let params = NWParameters(tls: nil, tcp: tcpOptions)
+                let connection = NWConnection(to: endpoint, using: params)
                 self.activeConnections[transferId] = connection
 
                 var hasCompletedOrRetried = false
                 let lock = NSLock()
+                var timeoutItem: DispatchWorkItem?
 
                 func handleAttemptFailure(error: Error) {
                     lock.lock()
@@ -403,6 +420,8 @@ public final class TransferEngine: @unchecked Sendable {
                         return
                     }
                     hasCompletedOrRetried = true
+                    timeoutItem?.cancel()
+                    timeoutItem = nil
                     lock.unlock()
 
                     self.activeConnections.removeValue(forKey: transferId)
@@ -446,13 +465,12 @@ public final class TransferEngine: @unchecked Sendable {
                     }
                 }
 
-                var timeoutItem: DispatchWorkItem? = DispatchWorkItem { [weak self] in
+                let deadlineItem = DispatchWorkItem { [weak self] in
                     guard self != nil else { return }
-                    handleAttemptFailure(error: TransferEngineError.connectionFailed("Connection timed out after 5 seconds"))
+                    handleAttemptFailure(error: TransferEngineError.connectionFailed("Connection timed out after 15 seconds"))
                 }
-                if let item = timeoutItem {
-                    self.queue.asyncAfter(deadline: .now() + 5.0, execute: item)
-                }
+                timeoutItem = deadlineItem
+                self.queue.asyncAfter(deadline: .now() + 15.0, execute: deadlineItem)
 
                 connection.stateUpdateHandler = { [weak self] state in
                     guard let self = self else { return }
@@ -614,11 +632,11 @@ public final class TransferEngine: @unchecked Sendable {
             }
             completed = true
             lock.unlock()
-            completion(.failure(TransferEngineError.connectionFailed("Target device did not respond within 5s. Ensure Nearside is open and receiving on the device.")))
+            completion(.failure(TransferEngineError.connectionFailed("Target device did not respond within 15s. Ensure Nearside is open and receiving on the device.")))
         }
 
         if let item = timerItem {
-            self.queue.asyncAfter(deadline: .now() + 5.0, execute: item)
+            self.queue.asyncAfter(deadline: .now() + 15.0, execute: item)
         }
 
         func finish(_ result: Result<TransferAck, Error>) {
