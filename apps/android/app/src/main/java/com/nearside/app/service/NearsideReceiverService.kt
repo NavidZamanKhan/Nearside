@@ -24,9 +24,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.util.UUID
 
@@ -160,80 +162,102 @@ class NearsideReceiverService : Service() {
     private fun startTcpListener() {
         serviceScope.launch(Dispatchers.IO) {
             stopTcpListener()
-            try {
-                val socket = ServerSocket(41433)
-                serverSocket = socket
-                NearsideLogger.info(
-                    subsystem = "connection",
-                    operation = "startTcpListener",
-                    message = "TCP ServerSocket bound to port 41433",
-                    state = "listening"
-                )
-                val trustStore = PinnedTrustStore.fromContext(this@NearsideReceiverService)
-                val deviceIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(this@NearsideReceiverService)
-                val destDir = (android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                    ?: filesDir).apply { mkdirs() }
+            val trustStore = PinnedTrustStore.fromContext(this@NearsideReceiverService)
+            val deviceIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(this@NearsideReceiverService)
 
-                while (isActive && !socket.isClosed) {
-                    try {
-                        val client = socket.accept()
-                        if (!isReceiving) {
-                            client.close()
-                            continue
-                        }
-                        serviceScope.launch {
-                            val transferTag = "rx_${UUID.randomUUID().toString().take(8)}"
-                            powerLockManager.acquire(transferTag)
-                            try {
-                                val result = TransferEngine.handleInboundConnection(
-                                    socket = client,
-                                    trustStore = trustStore,
-                                    deviceIdentity = deviceIdentity,
-                                    destinationDir = destDir,
-                                    onProgress = { _, record ->
-                                        updateTransferProgressNotification(record)
+            val pubDownloads = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val isPubWritable = try {
+                pubDownloads != null && (pubDownloads.exists() || pubDownloads.mkdirs()) && File(pubDownloads, ".nearside_probe_${System.currentTimeMillis()}").let {
+                    val ok = it.createNewFile()
+                    if (ok) it.delete()
+                    ok
+                }
+            } catch (_: Exception) { false }
+
+            val destDir = if (isPubWritable && pubDownloads != null) {
+                pubDownloads
+            } else {
+                getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            }
+
+            while (isActive && isReceiving) {
+                var socket: ServerSocket? = null
+                try {
+                    socket = ServerSocket().apply {
+                        reuseAddress = true
+                        bind(InetSocketAddress(41433))
+                    }
+                    serverSocket = socket
+                    NearsideLogger.info(
+                        subsystem = "connection",
+                        operation = "startTcpListener",
+                        message = "TCP ServerSocket bound to port 41433",
+                        state = "listening"
+                    )
+
+                    while (isActive && isReceiving && !socket.isClosed) {
+                        try {
+                            val client = socket.accept()
+                            if (!isReceiving) {
+                                client.close()
+                                continue
+                            }
+                            serviceScope.launch {
+                                val transferTag = "rx_${UUID.randomUUID().toString().take(8)}"
+                                powerLockManager.acquire(transferTag)
+                                try {
+                                    val result = TransferEngine.handleInboundConnection(
+                                        socket = client,
+                                        trustStore = trustStore,
+                                        deviceIdentity = deviceIdentity,
+                                        destinationDir = destDir,
+                                        onProgress = { _, record ->
+                                            updateTransferProgressNotification(record)
+                                        }
+                                    )
+                                    result.onSuccess { record ->
+                                        clearTransferNotification()
+                                        if (record.payloadText != null) {
+                                            handleReceivedTextPayload(record)
+                                        } else {
+                                            handleReceivedFilePayload(record, destDir)
+                                        }
+                                    }.onFailure {
+                                        clearTransferNotification()
                                     }
-                                )
-                                result.onSuccess { record ->
-                                    clearTransferNotification()
-                                    if (record.payloadText != null) {
-                                        handleReceivedTextPayload(record)
-                                    } else {
-                                        handleReceivedFilePayload(record, destDir)
+                                } finally {
+                                    try { client.close() } catch (ignored: Exception) {}
+                                    powerLockManager.release(transferTag)
+                                    if (powerLockManager.activeCount == 0) {
+                                        updateNotification(isPaused = !isReceiving)
                                     }
-                                }.onFailure {
-                                    clearTransferNotification()
-                                }
-                            } finally {
-                                try { client.close() } catch (ignored: Exception) {}
-                                powerLockManager.release(transferTag)
-                                if (powerLockManager.activeCount == 0) {
-                                    updateNotification(isPaused = !isReceiving)
                                 }
                             }
-                        }
-                    } catch (e: Exception) {
-                        if (!socket.isClosed) {
+                        } catch (e: Exception) {
+                            if (socket.isClosed || !isActive || !isReceiving) break
                             NearsideLogger.warn(
                                 subsystem = "connection",
                                 operation = "acceptLoop",
-                                message = "Socket accept interrupted or failed",
+                                message = "Socket accept error, continuing loop",
                                 underlyingError = e
                             )
                         }
-                        break
                     }
+                } catch (e: Exception) {
+                    if (!isActive || !isReceiving) break
+                    NearsideLogger.error(
+                        NearsideError(
+                            code = NearsideErrorCode.CONNECTION_BIND_FAILED,
+                            operation = "startTcpListener",
+                            message = "Failed to bind TCP ServerSocket to port 41433: ${e.message}",
+                            underlyingError = e
+                        ),
+                        state = "retrying"
+                    )
+                    delay(2000)
+                } finally {
+                    try { socket?.close() } catch (_: Exception) {}
                 }
-            } catch (e: Exception) {
-                NearsideLogger.error(
-                    NearsideError(
-                        code = NearsideErrorCode.CONNECTION_BIND_FAILED,
-                        operation = "startTcpListener",
-                        message = "Failed to bind TCP ServerSocket to port 41433: ${e.message}",
-                        underlyingError = e
-                    ),
-                    state = "failed"
-                )
             }
         }
     }
@@ -376,6 +400,43 @@ class NearsideReceiverService : Service() {
     private fun handleReceivedFilePayload(record: TransferRecord, destDir: File) {
         val file = File(destDir, record.filename)
         if (!file.exists()) return
+
+        // If saved into app-specific storage, export a copy to public MediaStore Downloads
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val pubDownloads = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                if (destDir.canonicalPath != pubDownloads?.canonicalPath) {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, record.filename)
+                        put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/Nearside")
+                    }
+                    val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) {
+                        contentResolver.openOutputStream(uri)?.use { outStream ->
+                            file.inputStream().use { inStream ->
+                                inStream.copyTo(outStream)
+                            }
+                        }
+                        NearsideLogger.info("transfer", "exportMediaStore", "Exported received file to public Downloads/Nearside", correlationId = record.id)
+                    }
+                }
+            } catch (e: Exception) {
+                NearsideLogger.warn("transfer", "exportMediaStore", "Error exporting to MediaStore Downloads", underlyingError = e)
+            }
+        }
+
+        // Notify MediaStore scan so Gallery and Files app index the file immediately
+        try {
+            android.media.MediaScannerConnection.scanFile(
+                applicationContext,
+                arrayOf(file.absolutePath),
+                null
+            ) { path, uri ->
+                NearsideLogger.info("transfer", "mediaScan", "Scanned received file to MediaStore", metadata = mapOf("path" to (path ?: "")))
+            }
+        } catch (e: Exception) {
+            NearsideLogger.warn("transfer", "mediaScan", "Error scanning file to MediaStore", underlyingError = e)
+        }
 
         val manager = getSystemService(NotificationManager::class.java)
         val notifBuilder = NotificationCompat.Builder(this, TRANSFER_CHANNEL_ID)

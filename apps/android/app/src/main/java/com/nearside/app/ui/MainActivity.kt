@@ -105,6 +105,7 @@ import com.nearside.app.model.PayloadType
 import com.nearside.app.model.TransferDirection
 import com.nearside.app.model.TransferRecord
 import com.nearside.app.model.TransferStatus
+import com.nearside.app.diagnostics.*
 import com.nearside.app.service.NearsideReceiverService
 import com.nearside.app.state.AppViewModel
 import com.nearside.app.state.NearsideUiState
@@ -185,8 +186,22 @@ class MainActivity : ComponentActivity() {
                     { device: NearsideDevice, uris: List<Uri> ->
                         val staged = uris.mapNotNull { uri ->
                             try {
-                                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file_${System.currentTimeMillis()}"
-                                val temp = java.io.File(cacheDir, name)
+                                var fileName: String? = null
+                                if (uri.scheme == "content") {
+                                    try {
+                                        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                                            if (cursor.moveToFirst()) {
+                                                val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                                if (idx != -1) fileName = cursor.getString(idx)
+                                            }
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                                val safeName = fileName?.takeIf { it.isNotBlank() }
+                                    ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                                    ?: "file_${System.currentTimeMillis()}"
+                                val cleanName = safeName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                                val temp = java.io.File(cacheDir, cleanName)
                                 contentResolver.openInputStream(uri)?.use { input ->
                                     java.io.FileOutputStream(temp).use { output ->
                                         input.copyTo(output)
@@ -194,14 +209,22 @@ class MainActivity : ComponentActivity() {
                                 }
                                 temp
                             } catch (e: Exception) {
+                                NearsideLogger.warn("transfer", "stageUri", "Failed to stage URI", underlyingError = e)
                                 null
                             }
                         }
                         if (staged.isNotEmpty()) {
                             viewModel.sendFiles(staged, device)
-                        } else {
-                            val filenames = uris.map { it.lastPathSegment ?: "file" }
-                            viewModel.simulateTransfer(device, filenames, 25_000_000L)
+                        } else if (uris.isNotEmpty()) {
+                            NearsideLogger.error(
+                                NearsideError(
+                                    code = NearsideErrorCode.STORAGE_READ_FAILED,
+                                    operation = "onSend",
+                                    message = "Could not access or stage selected files"
+                                ),
+                                state = "failed"
+                            )
+                            android.widget.Toast.makeText(this@MainActivity, "Could not read selected files", android.widget.Toast.LENGTH_SHORT).show()
                         }
                     }
                 }

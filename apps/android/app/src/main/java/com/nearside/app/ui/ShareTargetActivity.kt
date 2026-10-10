@@ -7,6 +7,12 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.lifecycle.lifecycleScope
+import com.nearside.app.crypto.DeviceIdentity
+import com.nearside.app.discovery.NsdDiscoveryService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -88,11 +94,118 @@ class ShareTargetActivity : ComponentActivity() {
                     summaryText = sharedSummary,
                     devices = knownDevices,
                     onDeviceSelected = { device ->
-                        Toast.makeText(this, "Sent to ${device.name}", Toast.LENGTH_SHORT).show()
-                        finish()
+                        performSend(device)
                     },
                     onDismiss = { finish() }
                 )
+            }
+        }
+    }
+
+    private fun performSend(device: NearsideDevice) {
+        val shareIntent = intent ?: run { finish(); return }
+        val trustStore = PinnedTrustStore.fromContext(this)
+        val deviceIdentity = DeviceIdentity.loadOrCreateDefault(this)
+        val resolved = NsdDiscoveryService.findDiscoveredDevice(device.fingerprint) ?: device
+        val host = resolved.ipAddress.orEmpty()
+        val port = resolved.port ?: 41433
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val uris = when (shareIntent.action) {
+                Intent.ACTION_SEND -> listOfNotNull(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        shareIntent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        shareIntent.getParcelableExtra(Intent.EXTRA_STREAM)
+                    }
+                )
+                Intent.ACTION_SEND_MULTIPLE -> (
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        shareIntent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        shareIntent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                    }
+                ).orEmpty()
+                else -> emptyList()
+            }
+
+            val text = shareIntent.getStringExtra(Intent.EXTRA_TEXT)
+
+            if (uris.isNotEmpty()) {
+                val staged = uris.mapNotNull { uri ->
+                    try {
+                        var fileName: String? = null
+                        if (uri.scheme == "content") {
+                            try {
+                                contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                                    if (cursor.moveToFirst()) {
+                                        val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                        if (idx != -1) fileName = cursor.getString(idx)
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        val safeName = fileName?.takeIf { it.isNotBlank() }
+                            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                            ?: "file_${System.currentTimeMillis()}"
+                        val cleanName = safeName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                        val temp = java.io.File(cacheDir, cleanName)
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            java.io.FileOutputStream(temp).use { output -> input.copyTo(output) }
+                        }
+                        temp
+                    } catch (e: Exception) { null }
+                }
+
+                if (staged.isNotEmpty()) {
+                    val result = com.nearside.app.transfer.TransferEngine.sendFiles(
+                        files = staged,
+                        host = host,
+                        port = port,
+                        senderId = deviceIdentity.publicIdentity,
+                        peerIdentity = device.fingerprint,
+                        trustStore = trustStore,
+                        deviceIdentity = deviceIdentity,
+                        onProgress = { _, _, _ -> }
+                    )
+                    withContext(Dispatchers.Main) {
+                        if (result.isSuccess) {
+                            Toast.makeText(this@ShareTargetActivity, "Sent to ${device.name}", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(this@ShareTargetActivity, "Transfer failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                        }
+                        finish()
+                    }
+                    return@launch
+                }
+            } else if (!text.isNullOrBlank()) {
+                val isUrl = text.startsWith("http://") || text.startsWith("https://")
+                val result = com.nearside.app.transfer.TransferEngine.sendText(
+                    text = text,
+                    isUrl = isUrl,
+                    host = host,
+                    port = port,
+                    senderId = deviceIdentity.publicIdentity,
+                    peerIdentity = device.fingerprint,
+                    trustStore = trustStore,
+                    deviceIdentity = deviceIdentity,
+                    onProgress = { _, _, _ -> }
+                )
+                withContext(Dispatchers.Main) {
+                    if (result.isSuccess) {
+                        Toast.makeText(this@ShareTargetActivity, "Sent to ${device.name}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@ShareTargetActivity, "Transfer failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                    }
+                    finish()
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@ShareTargetActivity, "No shareable content found", Toast.LENGTH_SHORT).show()
+                finish()
             }
         }
     }

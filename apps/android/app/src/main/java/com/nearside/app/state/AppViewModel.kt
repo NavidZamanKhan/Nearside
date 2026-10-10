@@ -341,61 +341,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
-    fun simulateTransfer(device: NearsideDevice, filenames: List<String>, totalBytes: Long) {
-        val record = TransferRecord(
-            deviceName = device.name,
-            devicePlatform = device.platform,
-            direction = TransferDirection.OUTGOING,
-            filename = filenames.firstOrNull() ?: "Document",
-            fileCount = filenames.size,
-            totalSizeBytes = totalBytes,
-            progress = 0.05f,
-            speedBytesPerSec = 38_500_000.0,
-            etaSeconds = 6L,
-            status = TransferStatus.TRANSFERRING
-        )
-
-        _uiState.update { it.copy(activeTransfer = record) }
-
-        viewModelScope.launch {
-            val totalSteps = 10
-            for (i in 1..totalSteps) {
-                delay(200)
-                if (com.nearside.app.transfer.TransferEngine.isTransferCancelled(record.id)) {
-                    return@launch
-                }
-                val frac = i / totalSteps.toFloat()
-                val remainingSec = ((totalSteps - i) * 0.25).toLong()
-                _uiState.update { current ->
-                    current.activeTransfer?.let {
-                        current.copy(
-                            activeTransfer = it.copy(
-                                progress = frac,
-                                speedBytesPerSec = 35_000_000.0 + (i * 1_200_000.0),
-                                etaSeconds = remainingSec
-                            )
-                        )
-                    } ?: current
-                }
-            }
-            _uiState.update { current ->
-                val finished = current.activeTransfer?.copy(
-                    progress = 1.0f,
-                    speedBytesPerSec = 0.0,
-                    etaSeconds = 0L,
-                    status = TransferStatus.COMPLETED
-                )
-                val updatedHistory = if (finished != null) {
-                    listOf(finished) + current.recentTransfers
-                } else current.recentTransfers
-
-                current.copy(
-                    activeTransfer = null,
-                    recentTransfers = updatedHistory
-                )
-            }
-        }
-    }
 
     fun clearHistory() {
         _uiState.update { it.copy(recentTransfers = emptyList()) }
