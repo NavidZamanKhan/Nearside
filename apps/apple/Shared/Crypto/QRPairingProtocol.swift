@@ -48,6 +48,15 @@ public struct QRPairingPayload: Codable {
         return version != 1 || !createdAt.isFinite || !expirySeconds.isFinite || expirySeconds <= 0 || expirySeconds > 180 || createdAt > Date().timeIntervalSince1970 + 30 || Date().timeIntervalSince1970 >= createdAt + expirySeconds
     }
 
+    /// Selection is an identity constraint, independent of the peer's display name.
+    public func validateSelectedHost(_ expectedIdentity: String?, localIdentity: String? = nil) throws {
+        guard !isExpired else { throw PairingError.sessionExpired.toNearsideError(correlationId: sessionId) }
+        guard hostIdentity != localIdentity, expectedIdentity == nil || hostIdentity == expectedIdentity else {
+            throw NearsideError(code: .pairingVerificationFailed, operation: "selectPairingTarget",
+                message: "This QR code belongs to a different device. Scan the selected device's QR.", correlationId: sessionId)
+        }
+    }
+
     public func toURI() -> String {
         var components = URLComponents()
         components.scheme = "nearside"
@@ -211,28 +220,36 @@ public final class QRPairingSession {
 /// Only a currently displayed, unused QR can authorize new enrollment.
 public final class QRPairingSessions {
     public static let shared = QRPairingSessions()
-    private var sessions: [String: QRPairingPayload] = [:]
+    private struct Registration {
+        let payload: QRPairingPayload
+        let expectedClientIdentity: String?
+    }
+    private var sessions: [String: Registration] = [:]
     private let lock = NSLock()
-    public func register(_ payload: QRPairingPayload) {
+    public func register(_ payload: QRPairingPayload, expectedClientIdentity: String? = nil) {
         lock.lock(); defer { lock.unlock() }
-        sessions = sessions.filter { !$0.value.isExpired }
-        sessions[payload.sessionId] = payload
+        sessions = sessions.filter { !$0.value.payload.isExpired }
+        sessions[payload.sessionId] = Registration(payload: payload, expectedClientIdentity: expectedClientIdentity)
     }
     public func unregister(_ sessionId: String) {
         lock.lock(); defer { lock.unlock() }
         sessions.removeValue(forKey: sessionId)
     }
-    public func requireActive(_ sessionId: String) throws -> QRPairingPayload {
+    public func requireActive(_ sessionId: String, clientIdentity: String? = nil) throws -> QRPairingPayload {
         lock.lock(); defer { lock.unlock() }
-        guard let payload = sessions[sessionId], !payload.isExpired else {
+        guard let registration = sessions[sessionId], !registration.payload.isExpired else {
             sessions.removeValue(forKey: sessionId)
             throw PairingError.sessionExpired
         }
-        return payload
+        if let expected = registration.expectedClientIdentity, expected != clientIdentity {
+            throw NearsideError(code: .pairingVerificationFailed, operation: "selectPairingTarget",
+                message: "Pairing request is from a different device than the selected peer.", correlationId: sessionId)
+        }
+        return registration.payload
     }
     public func consume(_ sessionId: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let payload = sessions.removeValue(forKey: sessionId) else { return false }
-        return !payload.isExpired
+        guard let registration = sessions.removeValue(forKey: sessionId) else { return false }
+        return !registration.payload.isExpired
     }
 }

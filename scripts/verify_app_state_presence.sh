@@ -19,6 +19,7 @@ xcrun swiftc -O -module-cache-path "$BUILD_DIR/ModuleCache" \
     apps/apple/Shared/AppState.swift \
     apps/apple/macOS/Views/MenuBarShelfView.swift \
     apps/apple/macOS/Views/PreferencesView.swift \
+    apps/apple/macOS/Views/MacPairingView.swift \
     apps/apple/macOS/Notifications/MacNotificationManager.swift \
     apps/apple/macOS/StatusItemController.swift \
     apps/apple/Tests/AppStatePresenceTests.swift \

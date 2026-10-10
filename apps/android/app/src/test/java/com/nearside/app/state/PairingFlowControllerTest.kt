@@ -91,4 +91,64 @@ class PairingFlowControllerTest {
         assertEquals(NearsideErrorCode.PAIRING_VERIFICATION_FAILED,
             assertThrows(NearsideError::class.java) { flow.begin(payload(local).toUri(), local) }.code)
     }
+
+    @Test fun queuedCaptureAfterCancellationCannotReopenPairing() {
+        val flow = PairingFlowController()
+        flow.openScan("MacBook", target)
+        val cameraRequest = flow.state.value!!.requestId
+        assertTrue(flow.cancel())
+        assertNull(flow.begin(payload().toUri(), local, cameraRequest))
+        assertNull(flow.state.value)
+    }
+
+    @Test fun earlierScannerCannotPairDuringNewTargetSelection() {
+        val flow = PairingFlowController()
+        flow.openScan("MacBook", target)
+        val earlierCamera = flow.state.value!!.requestId
+        val differentTarget = DeviceIdentity.generateEphemeral().publicIdentity
+        flow.openScan("Another MacBook", differentTarget)
+        val selected = flow.state.value
+        assertNull(flow.begin(payload().toUri(), local, earlierCamera))
+        assertEquals(selected, flow.state.value)
+    }
+
+    @Test fun staleCaptureIsRejectedBeforePayloadParsingAndNewScanStillWorks() {
+        val flow = PairingFlowController()
+        flow.openScan("MacBook", target)
+        val earlierCamera = flow.state.value!!.requestId
+        flow.retry()
+        val currentCamera = flow.state.value!!.requestId
+        assertNull(flow.begin("malformed stale camera payload", local, earlierCamera))
+        assertEquals(PairingPhase.SCANNING, flow.state.value?.phase)
+        assertNotNull(flow.begin(payload().toUri(), local, currentCamera))
+        assertEquals(PairingPhase.VERIFYING, flow.state.value?.phase)
+    }
+
+    @Test fun failedScanRequiresExplicitRetryBeforeAnotherCapture() {
+        val flow = PairingFlowController()
+        flow.openScan("MacBook", target)
+        val request = flow.state.value!!.requestId
+        assertThrows(NearsideError::class.java) { flow.begin("invalid", local, request) }
+        assertNull(flow.begin(payload().toUri(), local, request))
+        assertEquals(PairingPhase.FAILED, flow.state.value?.phase)
+        flow.retry()
+        assertNotNull(flow.begin(payload().toUri(), local, flow.state.value!!.requestId))
+    }
+
+    @Test fun deliberateManualUriSubmissionCanStartWithoutCameraRequest() {
+        val flow = PairingFlowController()
+        assertNotNull(flow.begin(payload().toUri(), local))
+        assertEquals(PairingPhase.VERIFYING, flow.state.value?.phase)
+    }
+
+    @Test fun dismissingLocalQrWithoutScannerDoesNotReportCancellation() {
+        val flow = PairingFlowController()
+        assertFalse(flow.cancel())
+        flow.openScan()
+        assertTrue(flow.cancel())
+        assertFalse(flow.cancel())
+        val attempt = flow.begin(payload().toUri(), local)!!
+        assertTrue(flow.complete(attempt.requestId))
+        assertFalse(flow.cancel())
+    }
 }

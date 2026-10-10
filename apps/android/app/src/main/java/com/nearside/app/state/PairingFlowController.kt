@@ -29,7 +29,10 @@ class PairingFlowController {
         mutableState.value = PairingFlowState(UUID.randomUUID().toString(), targetName, expectedIdentity)
     }
 
-    @Synchronized fun begin(uri: String, localIdentity: String): PairingAttempt? {
+    @Synchronized fun begin(uri: String, localIdentity: String, requestId: String? = null): PairingAttempt? {
+        // Camera callbacks can outlive a cancelled or replaced Compose view.
+        if (requestId != null && (mutableState.value?.requestId != requestId ||
+                mutableState.value?.phase != PairingPhase.SCANNING)) return null
         if (mutableState.value == null) openScan()
         val flow = mutableState.value ?: return null
         if (flow.phase == PairingPhase.VERIFYING) return null
@@ -64,7 +67,8 @@ class PairingFlowController {
     }
 
     @Synchronized fun cancel(): Boolean {
-        if (mutableState.value?.phase == PairingPhase.VERIFYING) return false
+        val flow = mutableState.value ?: return false
+        if (flow.phase == PairingPhase.VERIFYING) return false
         mutableState.value = null
         return true
     }

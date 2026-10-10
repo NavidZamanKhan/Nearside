@@ -17,6 +17,17 @@ struct QRPairingRegressionTests {
         check(parsed.hostName == payload.hostName, "URI values must round trip")
         check(parsed.sharedSecretBase64 == payload.sharedSecretBase64, "Base64 must round trip")
         let uri = payload.toURI()
+        try parsed.validateSelectedHost(host.publicIdentity, localIdentity: client.publicIdentity)
+        assertions += 1
+        do {
+            try parsed.validateSelectedHost(client.publicIdentity)
+            preconditionFailure("Selected peer identity mismatch accepted")
+        } catch let error as NearsideError {
+            check(error.code == .pairingVerificationFailed && error.correlationId == payload.sessionId,
+                "Selected identity mismatch is rejected with a correlated pairing diagnostic")
+        }
+        do { try parsed.validateSelectedHost(nil, localIdentity: host.publicIdentity); preconditionFailure("Local device QR accepted") }
+        catch let error as NearsideError { check(error.code == .pairingVerificationFailed, "Own QR rejected") }
         for malformed in [uri.replacingOccurrences(of: "v=1", with: "v=2"), uri + "&sid=duplicate",
             uri.replacingOccurrences(of: "nearside://pair", with: "https://pair"), uri + "#fragment",
             uri.replacingOccurrences(of: "ttl=120.0", with: "ttl=Infinity")] {
@@ -32,6 +43,14 @@ struct QRPairingRegressionTests {
         QRPairingSessions.shared.register(payload); QRPairingSessions.shared.unregister(payload.sessionId)
         do { _ = try QRPairingSessions.shared.requireActive(payload.sessionId); preconditionFailure("Dismissed session accepted") }
         catch PairingError.sessionExpired { assertions += 1 }
+        QRPairingSessions.shared.register(payload, expectedClientIdentity: client.publicIdentity)
+        do {
+            _ = try QRPairingSessions.shared.requireActive(payload.sessionId, clientIdentity: host.publicIdentity)
+            preconditionFailure("Wrong selected client accepted")
+        } catch let error as NearsideError { check(error.code == .pairingVerificationFailed, "Hosted QR rejects a different selected client") }
+        let selectedActive = try QRPairingSessions.shared.requireActive(payload.sessionId, clientIdentity: client.publicIdentity)
+        check(selectedActive.sessionId == payload.sessionId, "Wrong client cannot consume the selected client's session")
+        QRPairingSessions.shared.unregister(payload.sessionId)
         let hostSession = QRPairingSession(role: .host, localIdentity: host, payload: payload)
         let clientSession = QRPairingSession(role: .client, localIdentity: client, payload: parsed)
         let ht = hostSession.buildTranscript(remoteNonce: clientSession.localNonce, clientIdentity: client.publicIdentity, serverIdentity: host.publicIdentity)

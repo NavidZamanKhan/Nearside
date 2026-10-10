@@ -71,7 +71,7 @@ fun QrPairingScanner(onCaptured: (String) -> Unit, onManualEntry: () -> Unit) {
             Text("Camera unavailable. Paste the pairing URI or try the camera again.")
             TextButton(onClick = { cameraUnavailable = false; error = null; cameraAttempt++ }) { Text("Retry camera") }
         } else if (granted) {
-            key(cameraAttempt) { CameraQrPreview(correlationId = correlationId, onDecoded = { text ->
+            key(cameraAttempt) { CameraQrPreview(correlationId = correlationId, onDecoded = { text, pairableAtDecode ->
                 val payload = QRPairingPayload.fromUri(text)
                 if (payload == null) {
                     error = "This is not a valid Nearside pairing QR code."
@@ -81,6 +81,8 @@ fun QrPairingScanner(onCaptured: (String) -> Unit, onManualEntry: () -> Unit) {
                     }
                 } else if (payload.isExpired) {
                     error = "This QR code expired. Ask the other device to display a fresh code."
+                    // A delivery queued at the expiration boundary already closed the old capture gate.
+                    if (pairableAtDecode) cameraAttempt++
                     if (!reportedExpired) {
                         reportedExpired = true
                         NearsideLogger.warn("pairing", "parseQR", "QR pairing session expired", state = "rejected", correlationId = payload.sessionId, errorCode = NearsideErrorCode.PAIRING_SESSION_EXPIRED)
@@ -105,7 +107,7 @@ fun QrPairingScanner(onCaptured: (String) -> Unit, onManualEntry: () -> Unit) {
 }
 
 @Composable
-private fun CameraQrPreview(correlationId: String, onDecoded: (String) -> Unit, onFailure: () -> Unit) {
+private fun CameraQrPreview(correlationId: String, onDecoded: (String, Boolean) -> Unit, onFailure: () -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
@@ -143,8 +145,9 @@ private fun CameraQrPreview(correlationId: String, onDecoded: (String) -> Unit, 
                     val source = PlanarYUVLuminanceSource(bytes, frame.width, frame.height, 0, 0, frame.width, frame.height, false)
                     val reader = MultiFormatReader().apply { setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE))) }
                     val text = try { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text } finally { reader.reset() }
-                    if (gate.accept(text, QRPairingPayload.fromUri(text)?.isExpired == false)) {
-                        main.execute { if (!disposed.get()) decoded(text) }
+                    val pairable = QRPairingPayload.fromUri(text)?.isExpired == false
+                    if (gate.accept(text, pairable)) {
+                        main.execute { if (!disposed.get()) decoded(text, pairable) }
                     }
                 }
             } catch (_: ReaderException) { /* Normal frame without a readable QR. */ }

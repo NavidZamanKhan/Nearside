@@ -54,6 +54,7 @@ xcrun swiftc -O -emit-executable \
     apps/apple/Shared/AppState.swift \
     apps/apple/macOS/Views/MenuBarShelfView.swift \
     apps/apple/macOS/Views/PreferencesView.swift \
+    apps/apple/macOS/Views/MacPairingView.swift \
     apps/apple/macOS/Notifications/MacNotificationManager.swift \
     apps/apple/macOS/StatusItemController.swift \
     apps/apple/macOS/ShareExtension/MacShareHandoff.swift \

@@ -194,8 +194,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retryPairingScan() = pairingController.retry()
 
-    fun pairWithQrUri(uriString: String): Boolean {
-        val attempt = try { pairingController.begin(uriString, deviceIdentity.publicIdentity) }
+    fun pairWithQrUri(uriString: String, requestId: String? = null): Boolean {
+        val attempt = try { pairingController.begin(uriString, deviceIdentity.publicIdentity, requestId) }
         catch (error: com.nearside.app.diagnostics.NearsideError) {
             com.nearside.app.diagnostics.NearsideLogger.error(error, state = "rejected")
             return false
@@ -247,7 +247,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun pairDiscoveredDevice(device: NearsideDevice) {
-        _uiState.update { it.copy(toastMessage = "Display a pairing QR on ${device.name}, then select Scan QR.") }
+        if (device.id != device.fingerprint || device.fingerprint.isBlank()) {
+            _uiState.update { it.copy(toastMessage = "This device has no valid discovery identity. Scan its QR directly.") }
+            return
+        }
+        pairingController.openScan(device.name, device.fingerprint)
     }
 
     fun pairWithCode(code: String) {
@@ -255,8 +259,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendFiles(files: List<java.io.File>, device: NearsideDevice) {
-        if (!trustStore.isEnrolled(device.id)) {
-            pairDiscoveredDevice(device)
+        if (!trustStore.canTransfer(device.id)) {
+            if (!trustStore.isBlocked(device.id)) pairDiscoveredDevice(device)
+            else _uiState.update { it.copy(toastMessage = "This device is blocked") }
+            return
         }
 
         val totalBytes = files.sumOf { it.length() }
@@ -412,8 +418,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val isUrl = text.startsWith("http://") || text.startsWith("https://")
         val displayFilename = if (isUrl) text else if (text.length > 25) text.take(25) + "..." else text
 
-        if (!trustStore.isEnrolled(device.id)) {
-            pairDiscoveredDevice(device)
+        if (!trustStore.canTransfer(device.id)) {
+            if (!trustStore.isBlocked(device.id)) pairDiscoveredDevice(device)
+            else _uiState.update { it.copy(toastMessage = "This device is blocked") }
+            return
         }
 
         val record = TransferRecord(

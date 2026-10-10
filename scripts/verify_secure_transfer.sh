@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-xcrun swiftc -O \
+xcrun swiftc -O -module-cache-path "$interop_dir/module-cache" \
     apps/apple/Shared/Diagnostics/NearsideDiagnostics.swift \
     apps/apple/Shared/DeviceModels.swift \
     apps/apple/Shared/Crypto/DeviceIdentity.swift \
@@ -34,9 +34,9 @@ done
 if [ ! -f "$interop_dir/sender.json" ]; then cat "$interop_dir/swift.log"; exit 1; fi
 
 cd "$ROOT/apps/android"
-./gradlew :app:crossPlatformTransferHarness -PinteropDir="$interop_dir" --console=plain
+./gradlew :app:crossPlatformTransferHarness -PinteropDir="$interop_dir" --console=plain --offline --no-daemon
 wait "$swift_pid" || { cat "$interop_dir/swift.log"; exit 1; }
 swift_pid=""
 cat "$interop_dir/swift.log"
 test -f "$interop_dir/android_success"
-echo "Authenticated encrypted Swift/Kotlin transfer passed in both directions."
+echo "Mutual QR pairing, durable enrollment, and authenticated encrypted Swift/Kotlin transfer passed in both directions."

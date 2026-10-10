@@ -27,6 +27,8 @@ public final class AppState: ObservableObject {
     @Published public var activeTransfer: TransferRecord?
     @Published public var latestReceivedText: String?
     @Published public var clipboardToastMessage: String?
+    @Published public var activePairingPayload: QRPairingPayload?
+    @Published public var pairingStatusMessage: String?
 
     public init(deviceIdentity: DeviceIdentity? = nil, trustStore: PinnedTrustStore? = nil,
         startsDiscovery: Bool = true) {
@@ -93,12 +95,14 @@ public final class AppState: ObservableObject {
         }
         service.onInboundConnection = { [weak self] connection in
             guard let self = self else { return }
+            var inboundTransferId: String?
             TransferEngine.shared.handleInboundConnection(
                 connection: connection,
                 trustStore: self.trustStore,
                 deviceIdentity: self.deviceIdentity,
                 destinationFolder: self.downloadsFolderURL,
                 onProgress: { fraction, record in
+                    inboundTransferId = record.id
                     Task { @MainActor in
                         self.activeTransfer = record
                         #if os(macOS)
@@ -107,12 +111,21 @@ public final class AppState: ObservableObject {
                     }
                 },
                 onComplete: { result in
+                    let completedTransferId = inboundTransferId
                     Task { @MainActor in
-                        #if os(macOS)
-                        StatusItemController.shared.updateStatusIcon(isReceivingActive: self.isReceivingActive, isTransferring: false)
-                        #endif
+                        defer {
+                            #if os(macOS)
+                            StatusItemController.shared.updateStatusIcon(isReceivingActive: self.isReceivingActive,
+                                isTransferring: self.activeTransfer != nil)
+                            #endif
+                        }
                         switch result {
                         case .success(let finished):
+                            if finished.id.hasPrefix("pair_"), finished.fileCount == 0 {
+                                self.recordPairingSuccess(sessionId: String(finished.id.dropFirst("pair_".count)),
+                                    peerName: finished.deviceName)
+                                return
+                            }
                             self.transferHistory.insert(finished, at: 0)
                             self.activeTransfer = nil
                             if finished.payloadType == .text || finished.payloadType == .url {
@@ -125,16 +138,7 @@ public final class AppState: ObservableObject {
                             IOSNotificationManager.shared.notifyTransferComplete(record: finished, downloadsURL: self.downloadsFolderURL)
                             #endif
                         case .failure(let error):
-                            let nsErr = (error as? NearsideError) ?? (error as? TransferEngineError)?.toNearsideError(operation: "handleInboundConnection") ?? NearsideError(code: .transferInterrupted, operation: "handleInboundConnection", message: error.localizedDescription, underlyingError: error)
-                            NearsideLogger.shared.error(nsErr, state: "failed")
-                            if var failed = self.activeTransfer {
-                                failed.status = .failed
-                                failed.errorCode = nsErr.code.rawValue
-                                failed.errorMessage = nsErr.message
-                                failed.correlationId = failed.id
-                                self.transferHistory.insert(failed, at: 0)
-                            }
-                            self.activeTransfer = nil
+                            self.recordInboundFailure(error, transferId: completedTransferId)
                         }
                     }
                 }
@@ -177,86 +181,81 @@ public final class AppState: ObservableObject {
     }
 
     public func pairDevice(identity: String, name: String, platform: String, publicKey: P256.Signing.PublicKey) {
-        trustStore.enroll(identity: identity, name: name, platform: platform, publicKey: publicKey)
-        let devicePlatform: DevicePlatform
-        switch platform.lowercased() {
-        case "macos": devicePlatform = .macOS
-        case "android": devicePlatform = .android
-        case "ios": devicePlatform = .iOS
-        case "windows": devicePlatform = .windows
-        case "linux": devicePlatform = .linux
-        default: devicePlatform = .android
-        }
-
-        let newDevice = NearsideDevice(
-            id: identity,
-            name: name,
-            platform: devicePlatform,
-            fingerprint: identity,
-            reachability: .online,
-            lastSeen: Date()
-        )
-
-        pairedDevices.removeAll { $0.id == identity }
-        pairedDevices.append(newDevice)
-    }
-
-    public func pairDiscoveredDevice(_ device: NearsideDevice, completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
-        var host = device.ipAddress
-        var port = device.port
-        if host == nil || host?.isEmpty == true {
-            if let disc = DiscoveryService.shared.findDiscoveredDevice(identity: device.id) {
-                host = disc.ipAddress
-                port = disc.port
-            }
-        }
-
-        guard let targetHost = host, !targetHost.isEmpty else {
-            completion?(.failure(TransferEngineError.connectionFailed("No IP address for peer")))
-            return
-        }
-
-        TransferEngine.shared.initiatePairing(
-            to: targetHost,
-            port: UInt16(port ?? 41433),
-            confirmationCode: "",
-            deviceIdentity: self.deviceIdentity,
-            deviceName: self.localDeviceName,
-            trustStore: self.trustStore
-        ) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                switch result {
-                case .success(let resp):
-                    let newDevice = NearsideDevice(
-                        id: resp.serverId,
-                        name: resp.serverName,
-                        platform: device.platform,
-                        fingerprint: resp.serverId,
-                        ipAddress: targetHost,
-                        port: port,
-                        reachability: .online,
-                        lastSeen: Date()
-                    )
-                    self.trustStore.updatePeerEndpoint(identity: resp.serverId, ip: targetHost, port: UInt16(port ?? 41433))
-                    self.pairedDevices.removeAll { $0.id == resp.serverId }
-                    self.pairedDevices.append(newDevice)
-                    completion?(.success(newDevice))
-                case .failure(let error):
-                    completion?(.failure(error))
-                }
-            }
+        do {
+            try trustStore.enrollVerifiedPeer(identity: identity, name: name, platform: platform, publicKey: publicKey)
+            refreshTrustedDevices()
+        } catch {
+            let failure = (error as? NearsideError) ?? NearsideError(code: .trustStorageFailed,
+                operation: "pairDevice", message: "Could not save verified peer enrollment", underlyingError: error)
+            NearsideLogger.shared.error(failure, state: "failed")
         }
     }
 
-    public func pairWithQrPayload(_ payload: QRPairingPayload, completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
-        guard !payload.isExpired else {
-            completion?(.failure(PairingError.sessionExpired.toNearsideError(correlationId: payload.sessionId)))
+    public func startPairingSession(expectedPeerIdentity: String? = nil) -> QRPairingPayload? {
+        stopPairingSession()
+        guard isReceivingActive else {
+            pairingStatusMessage = "Turn on Receiving to display a pairing QR."
+            return nil
+        }
+        let payload = QRPairingPayload(hostIdentity: localFingerprint, hostName: localDeviceName)
+        QRPairingSessions.shared.register(payload, expectedClientIdentity: expectedPeerIdentity)
+        activePairingPayload = payload
+        pairingStatusMessage = nil
+        return payload
+    }
+
+    public func stopPairingSession(expectedSessionId: String? = nil) {
+        if let expectedSessionId, activePairingPayload?.sessionId != expectedSessionId { return }
+        if let payload = activePairingPayload { QRPairingSessions.shared.unregister(payload.sessionId) }
+        activePairingPayload = nil
+    }
+
+    func recordPairingSuccess(sessionId: String, peerName: String) {
+        refreshTrustedDevices()
+        let message = "Paired with \(peerName)"
+        clipboardToastMessage = message
+        guard activePairingPayload?.sessionId == sessionId else { return }
+        pairingStatusMessage = message
+        QRPairingSessions.shared.unregister(sessionId)
+        activePairingPayload = nil
+    }
+
+    func recordPairingFailure(_ failure: NearsideError) {
+        guard let payload = activePairingPayload, failure.correlationId == payload.sessionId else { return }
+        pairingStatusMessage = "Pairing failed [\(failure.code.rawValue)]. Display a fresh QR code and retry."
+    }
+
+    func recordInboundFailure(_ error: Error, transferId: String?) {
+        let failure = (error as? NearsideError)
+            ?? (error as? TransferEngineError)?.toNearsideError(operation: "handleInboundConnection")
+            ?? NearsideError(code: .transferInterrupted, operation: "handleInboundConnection",
+                message: "Incoming transfer failed", underlyingError: error)
+        NearsideLogger.shared.error(failure, state: "failed")
+        recordPairingFailure(failure)
+        // A QR exchange has no transfer progress and cannot fail another connection's file.
+        guard let transferId, var failed = activeTransfer, failed.id == transferId else { return }
+        failed.status = .failed
+        failed.errorCode = failure.code.rawValue
+        failed.errorMessage = failure.message
+        failed.correlationId = failed.id
+        transferHistory.insert(failed, at: 0)
+        activeTransfer = nil
+    }
+
+    public func pairWithQrPayload(_ payload: QRPairingPayload, expectedIdentity: String? = nil,
+        completion: ((Result<NearsideDevice, Error>) -> Void)? = nil) {
+        do { try payload.validateSelectedHost(expectedIdentity, localIdentity: deviceIdentity.publicIdentity) }
+        catch {
+            if let failure = error as? NearsideError { NearsideLogger.shared.error(failure, state: "rejected") }
+            completion?(.failure(error))
             return
         }
         let live = DiscoveryService.shared.findDiscoveredDevice(identity: payload.hostIdentity)
         guard let host = live?.ipAddress ?? payload.ip, !host.isEmpty else {
-            completion?(.failure(NearsideError(code: .discoveryResolveFailed, operation: "pairQR", message: "Pairing device is not currently discoverable", correlationId: payload.sessionId)))
+            let error = NearsideError(code: .discoveryResolveFailed, operation: "pairQR",
+                message: "Pairing device is not currently discoverable", correlationId: payload.sessionId)
+            NearsideLogger.shared.error(error, state: "failed")
+            completion?(.failure(error))
             return
         }
         let port = live?.port ?? UInt16(exactly: payload.port ?? 41433) ?? 41433
@@ -277,21 +276,20 @@ public final class AppState: ObservableObject {
                 guard let self = self else { return }
                 switch result {
                 case .success(let resp):
-                    let newDevice = NearsideDevice(
-                        id: resp.serverId,
-                        name: resp.serverName,
-                        platform: .android,
-                        fingerprint: resp.serverId,
-                        ipAddress: host,
-                        port: port,
-                        reachability: .online,
-                        lastSeen: Date()
-                    )
-                    self.pairedDevices.removeAll { $0.id == resp.serverId }
-                    self.pairedDevices.append(newDevice)
+                    self.refreshTrustedDevices()
+                    guard let newDevice = self.pairedDevices.first(where: { $0.fingerprint == resp.serverId }),
+                          self.trustStore.canTransfer(identity: resp.serverId) else {
+                        completion?(.failure(NearsideError(code: .trustStorageFailed, operation: "pairQR",
+                            message: "Verified peer enrollment was not saved", correlationId: qrPayload?.sessionId)))
+                        return
+                    }
                     completion?(.success(newDevice))
                 case .failure(let error):
-                    completion?(.failure(error))
+                    let failure = (error as? NearsideError) ?? NearsideError(code: .pairingVerificationFailed,
+                        operation: "pairQR", message: "Pairing verification failed. Display a fresh QR code and retry.",
+                        underlyingError: error, correlationId: qrPayload?.sessionId)
+                    NearsideLogger.shared.error(failure, state: "failed")
+                    completion?(.failure(failure))
                 }
             }
         }

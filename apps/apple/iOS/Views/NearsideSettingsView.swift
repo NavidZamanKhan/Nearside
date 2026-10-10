@@ -3,6 +3,8 @@ import SwiftUI
 public struct NearsideSettingsView: View {
     @ObservedObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    @State private var pendingUnpair: NearsideDevice?
+    @State private var unpairError: String?
 
     public init(appState: AppState) {
         self.appState = appState
@@ -31,7 +33,12 @@ public struct NearsideSettingsView: View {
                 }
 
                 Section(header: Text("Receiving Preferences")) {
-                    Toggle("Active Receiver", isOn: $appState.isReceivingActive)
+                    Toggle("Active Receiver", isOn: Binding(
+                        get: { appState.isReceivingActive },
+                        set: { value in
+                            if value != appState.isReceivingActive { appState.toggleReceiving() }
+                        }
+                    ))
                     Toggle("Auto-Accept from Paired", isOn: $appState.autoAcceptFromPaired)
 
                     HStack {
@@ -61,11 +68,8 @@ public struct NearsideSettingsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                        }
-                        .onDelete { indexSet in
-                            for index in indexSet {
-                                let device = appState.pairedDevices[index]
-                                appState.unpairDevice(id: device.id)
+                            .swipeActions {
+                                Button("Unpair", role: .destructive) { pendingUnpair = device }
                             }
                         }
                     }
@@ -88,6 +92,32 @@ public struct NearsideSettingsView: View {
                         dismiss()
                     }
                 }
+            }
+            .confirmationDialog("Remove this device's trust?", isPresented: Binding(
+                get: { pendingUnpair != nil },
+                set: { if !$0 { pendingUnpair = nil } }
+            ), titleVisibility: .visible) {
+                if let device = pendingUnpair {
+                    Button("Unpair \(device.name)", role: .destructive) {
+                        if case .failure(let error) = appState.unpairDevice(id: device.id) {
+                            unpairError = error.localizedDescription
+                        }
+                        pendingUnpair = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) { pendingUnpair = nil }
+            } message: {
+                if let device = pendingUnpair {
+                    Text("Only \(device.name) (\(device.shortFingerprint)) will be removed. Pair again to transfer content.")
+                }
+            }
+            .alert("Unable to Unpair", isPresented: Binding(
+                get: { unpairError != nil },
+                set: { if !$0 { unpairError = nil } }
+            )) {
+                Button("OK") { unpairError = nil }
+            } message: {
+                Text(unpairError ?? "")
             }
         }
     }

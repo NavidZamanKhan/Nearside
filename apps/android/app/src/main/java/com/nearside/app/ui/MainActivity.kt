@@ -175,7 +175,7 @@ class MainActivity : ComponentActivity() {
                 val onUnpair = remember { { id: String -> viewModel.unpairDevice(id) } }
                 val onPairCode = remember { { code: String -> viewModel.pairWithCode(code) } }
                 val onPairQr = remember {
-                    { input: String -> viewModel.pairWithQrUri(input.trim()) }
+                    { input: String, requestId: String? -> viewModel.pairWithQrUri(input.trim(), requestId) }
                 }
                 val onBeam = remember { { device: NearsideDevice -> viewModel.sendClipboard(device) } }
                 val onClear = remember { { viewModel.clearHistory() } }
@@ -244,7 +244,7 @@ fun MainScreen(
     onCancelTransfer: (String) -> Unit,
     onUnpair: (String) -> Unit,
     onPairWithCode: (String) -> Unit,
-    onPairWithQrUri: (String) -> Boolean,
+    onPairWithQrUri: (String, String?) -> Boolean,
     onOpenQrScanner: () -> Unit,
     onCancelPairing: () -> Unit,
     onRetryPairingScan: () -> Unit,
@@ -538,11 +538,7 @@ fun MainScreen(
                 items(unpairedDiscovered, key = { "disc_${it.id}" }) { device ->
                     DiscoveredDeviceCard(
                         device = device,
-                        onPairClick = { onPairDiscovered(device) },
-                        onSendFilesClick = {
-                            targetDeviceForPicker = device
-                            filePickerLauncher.launch("*/*")
-                        }
+                        onPairClick = { showQrDialog = false; onPairDiscovered(device) }
                     )
                 }
             }
@@ -593,10 +589,13 @@ fun MainScreen(
             initialMode = if (uiState.pairingFlow != null) "scan" else "show",
             pairingFlow = uiState.pairingFlow,
             onDismiss = { showQrDialog = false; onCancelPairing() },
-            onStartScan = { showQrDialog = false; onOpenQrScanner() },
+            onStartScan = {
+                showQrDialog = false
+                if (uiState.pairingFlow != null) onRetryPairingScan() else onOpenQrScanner()
+            },
             onRetryScan = onRetryPairingScan,
             onPairWithUri = { uri ->
-                val started = onPairWithQrUri(uri)
+                val started = onPairWithQrUri(uri, uiState.pairingFlow?.requestId)
                 if (started) showQrDialog = false
                 started
             }
@@ -998,8 +997,7 @@ fun IdentityCard(
 @Composable
 fun DiscoveredDeviceCard(
     device: NearsideDevice,
-    onPairClick: () -> Unit,
-    onSendFilesClick: () -> Unit
+    onPairClick: () -> Unit
 ) {
     val platformColor = when (device.platform) {
         DevicePlatform.MACOS -> NearsideBlue
@@ -1077,13 +1075,6 @@ fun DiscoveredDeviceCard(
                         Text(text = "Pair", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
 
-                    OutlinedButton(
-                        onClick = onSendFilesClick,
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(text = "Send", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    }
                 }
             }
         }
@@ -1482,81 +1473,90 @@ fun QrPairingDialog(
                     Text(pairingFlow?.errorMessage ?: "Pairing failed. Display a fresh QR code and try again.", color = MaterialTheme.colorScheme.error)
                     TextButton(onClick = onRetryScan) { Text("Scan again") }
                 } else {
+                    pairingFlow?.targetName?.let { target ->
+                        Text("Scan the QR code displayed on $target.", style = MaterialTheme.typography.bodyMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                     Row {
                         TextButton(onClick = onStartScan) { Text("Scan QR") }
-                        TextButton(onClick = { mode = "show"; error = null }) { Text("Show mine") }
-                    }
-                if (mode == "scan") {
-                    QrPairingScanner(onCaptured = { uri ->
-                        if (!onPairWithUri(uri)) error = "Pairing could not start. Check the QR code and nearby device connection."
-                    }, onManualEntry = { mode = "manual" })
-                } else if (isEnteringUri) {
-                    Text(
-                        text = "Paste the current nearside://pair URI from the other device:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = uriInput,
-                        onValueChange = { uriInput = it },
-                        label = { Text(text = "nearside://pair?...") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = false,
-                        maxLines = 3
-                    )
-                } else {
-                    Text(
-                        text = "Scan this code using Nearside on the other device:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(200.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(androidx.compose.ui.graphics.Color.White)
-                            .padding(8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (qrBitmap != null) {
-                            Image(
-                                bitmap = qrBitmap.asImageBitmap(),
-                                contentDescription = "Pairing QR Code",
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.QrCode,
-                                contentDescription = null,
-                                tint = androidx.compose.ui.graphics.Color.Black,
-                                modifier = Modifier.size(100.dp)
-                            )
+                        if (pairingFlow?.targetName == null) {
+                            TextButton(onClick = { mode = "show"; error = null }) { Text("Show mine") }
                         }
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Device IP: $localIp:41433",
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Fingerprint: ${fingerprint.take(16)}...",
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                if (mode != "scan") {
-                    TextButton(onClick = { mode = if (isEnteringUri) "show" else "manual" }) {
-                        Text(text = if (isEnteringUri) "Show My QR Code" else "Paste URI manually")
+                    if (mode == "scan") {
+                        QrPairingScanner(onCaptured = { uri ->
+                            if (!onPairWithUri(uri)) error = "Pairing could not start. Check the QR code and nearby device connection."
+                        }, onManualEntry = { mode = "manual" })
+                    } else if (isEnteringUri) {
+                        Text(
+                            text = "Paste the current nearside://pair URI from the other device:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = uriInput,
+                            onValueChange = { uriInput = it },
+                            label = { Text(text = "nearside://pair?...") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = false,
+                            maxLines = 3
+                        )
+                    } else {
+                        Text(
+                            text = "Scan this code using Nearside on the other device:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(200.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(androidx.compose.ui.graphics.Color.White)
+                                .padding(8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (qrBitmap != null) {
+                                Image(
+                                    bitmap = qrBitmap.asImageBitmap(),
+                                    contentDescription = "Pairing QR Code",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.QrCode,
+                                    contentDescription = null,
+                                    tint = androidx.compose.ui.graphics.Color.Black,
+                                    modifier = Modifier.size(100.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Device IP: $localIp:41433",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Fingerprint: ${fingerprint.take(16)}...",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    if (mode != "scan") {
+                        TextButton(onClick = {
+                            if (isEnteringUri && pairingFlow?.targetName != null) onRetryScan()
+                            else mode = if (isEnteringUri) "show" else "manual"
+                        }) {
+                            Text(text = if (!isEnteringUri) "Paste URI manually" else if (pairingFlow?.targetName != null) "Scan QR" else "Show My QR Code")
+                        }
+                    }
+                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             }
         },

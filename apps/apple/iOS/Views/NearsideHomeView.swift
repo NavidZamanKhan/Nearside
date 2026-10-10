@@ -5,7 +5,9 @@ import UniformTypeIdentifiers
 public struct NearsideHomeView: View {
     @ObservedObject var appState: AppState
 
-    @State private var isShowingPairSheet: Bool = false
+    @State private var pairingRequest: PairingScannerRequest?
+    @State private var pendingUnpair: NearsideDevice?
+    @State private var unpairError: String?
     @State private var isShowingSettingsSheet: Bool = false
     @State private var isShowingFilePicker: Bool = false
     @State private var isShowingPhotoPicker: Bool = false
@@ -37,7 +39,12 @@ public struct NearsideHomeView: View {
                 // Control Center Style Hero Card
                 Section {
                     ControlCenterHeroCard(
-                        isReceivingActive: $appState.isReceivingActive,
+                        isReceivingActive: Binding(
+                            get: { appState.isReceivingActive },
+                            set: { value in
+                                if value != appState.isReceivingActive { appState.toggleReceiving() }
+                            }
+                        ),
                         deviceName: appState.localDeviceName
                     )
                 }
@@ -70,7 +77,7 @@ public struct NearsideHomeView: View {
                             isShowingPhotoPicker = true
                         },
                         onShowPairing: {
-                            isShowingPairSheet = true
+                            showScanner()
                         }
                     )
                 }
@@ -100,7 +107,7 @@ public struct NearsideHomeView: View {
                                     appState.sendClipboard(to: device)
                                 },
                                 onUnpair: {
-                                    appState.unpairDevice(id: device.id)
+                                    pendingUnpair = device
                                 }
                             )
                         }
@@ -108,9 +115,9 @@ public struct NearsideHomeView: View {
                 }
 
                 // Discovered Peers
-                if !appState.discoveredDevices.isEmpty {
+                if !appState.availableNearbyDevices.isEmpty {
                     Section(header: Text("Nearby on Local Network").font(.caption).bold()) {
-                        ForEach(appState.discoveredDevices) { device in
+                        ForEach(appState.availableNearbyDevices) { device in
                             HStack {
                                 Image(systemName: iconForPlatform(device.platform))
                                     .foregroundStyle(colorForPlatform(device.platform))
@@ -127,9 +134,11 @@ public struct NearsideHomeView: View {
 
                                 Spacer()
 
-                                Text("Available")
-                                    .font(.caption)
-                                    .foregroundStyle(.green)
+                                Button("Pair") {
+                                    showScanner(for: device)
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Pair with \(device.name)")
                             }
                         }
                     }
@@ -165,7 +174,7 @@ public struct NearsideHomeView: View {
 
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
-                        isShowingPairSheet = true
+                        showScanner()
                     } label: {
                         Image(systemName: "qrcode.viewfinder")
                     }
@@ -173,11 +182,12 @@ public struct NearsideHomeView: View {
                     .accessibilityIdentifier("scanPairingQR")
 
                     Button {
-                        isShowingPairSheet = true
+                        showScanner()
                     } label: {
                         Image(systemName: "plus")
                             .bold()
                     }
+                    .accessibilityLabel("Pair a device")
                 }
             }
             .fileImporter(
@@ -218,14 +228,49 @@ public struct NearsideHomeView: View {
                     }
                 }
             }
-            .sheet(isPresented: $isShowingPairSheet) {
-                QRPairingScannerView(appState: appState)
+            .sheet(item: $pairingRequest) { request in
+                QRPairingScannerView(appState: appState, expectedPeer: request.peer)
             }
             .sheet(isPresented: $isShowingSettingsSheet) {
                 NearsideSettingsView(appState: appState)
             }
+            .confirmationDialog("Remove this device's trust?", isPresented: Binding(
+                get: { pendingUnpair != nil },
+                set: { if !$0 { pendingUnpair = nil } }
+            ), titleVisibility: .visible) {
+                if let device = pendingUnpair {
+                    Button("Unpair \(device.name)", role: .destructive) {
+                        if case .failure(let error) = appState.unpairDevice(id: device.id) {
+                            unpairError = error.localizedDescription
+                        }
+                        pendingUnpair = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) { pendingUnpair = nil }
+            } message: {
+                if let device = pendingUnpair {
+                    Text("Only \(device.name) (\(device.shortFingerprint)) will be removed. Pair again to transfer content.")
+                }
+            }
+            .alert("Unable to Unpair", isPresented: Binding(
+                get: { unpairError != nil },
+                set: { if !$0 { unpairError = nil } }
+            )) {
+                Button("OK") { unpairError = nil }
+            } message: {
+                Text(unpairError ?? "")
+            }
         }
     }
+
+    private func showScanner(for peer: NearsideDevice? = nil) {
+        pairingRequest = PairingScannerRequest(peer: peer)
+    }
+}
+
+private struct PairingScannerRequest: Identifiable {
+    let id = UUID()
+    let peer: NearsideDevice?
 }
 
 // MARK: - Control Center Hero Card

@@ -44,6 +44,22 @@ struct QRScannerCaptureStateTests {
         check(invalid.capture() && invalid.cancel(), "Cancellation also works after an invalid capture")
         check(!invalid.beginPairing(), "Cancelled captures cannot enroll peers")
 
+        var camera = QRCameraAvailabilityState()
+        check(camera.canConfigureOrStart, "A fresh camera controller may configure the camera")
+        camera.interrupt()
+        check(!camera.canConfigureOrStart, "An interruption pauses the camera")
+        camera.resumeAfterInterruption()
+        check(camera.canConfigureOrStart, "A temporary interruption may recover without reopening the scanner")
+        camera.fail()
+        check(!camera.canConfigureOrStart, "A missing camera or configuration failure blocks automatic retries")
+        camera.resumeAfterInterruption()
+        check(!camera.canConfigureOrStart, "A later resume cannot clear a failed configuration")
+        camera.interrupt()
+        camera.resumeAfterInterruption()
+        check(!camera.canConfigureOrStart, "An interruption cannot overwrite a latched failure")
+        camera = QRCameraAvailabilityState()
+        check(camera.canConfigureOrStart, "Explicit retry recreates the controller and permits one new attempt")
+
         print("QR scanner capture state: \(checks) checks passed")
     }
 }

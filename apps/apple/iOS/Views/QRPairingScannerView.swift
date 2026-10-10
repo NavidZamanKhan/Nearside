@@ -36,6 +36,25 @@ struct QRScannerCaptureState {
     }
 }
 
+/// Configuration failures require a fresh controller; temporary interruptions may recover.
+struct QRCameraAvailabilityState {
+    enum Phase: Equatable { case available, interrupted, failed }
+    private(set) var phase: Phase = .available
+    var canConfigureOrStart: Bool { phase == .available }
+
+    mutating func fail() { phase = .failed }
+
+    mutating func interrupt() {
+        guard phase != .failed else { return }
+        phase = .interrupted
+    }
+
+    mutating func resumeAfterInterruption() {
+        guard phase == .interrupted else { return }
+        phase = .available
+    }
+}
+
 #if os(iOS)
 import SwiftUI
 import AVFoundation
@@ -43,6 +62,7 @@ import UIKit
 
 public struct QRPairingScannerView: View {
     @ObservedObject var appState: AppState
+    let expectedPeer: NearsideDevice?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
@@ -57,8 +77,9 @@ public struct QRPairingScannerView: View {
     @State private var scannerCorrelationId = UUID().uuidString
     @State private var cameraGeneration = UUID()
 
-    public init(appState: AppState) {
+    public init(appState: AppState, expectedPeer: NearsideDevice? = nil) {
         self.appState = appState
+        self.expectedPeer = expectedPeer
     }
 
     public var body: some View {
@@ -72,6 +93,15 @@ public struct QRPairingScannerView: View {
                 .pickerStyle(.segmented)
                 .padding()
                 .disabled(captureState.isProcessing)
+
+                if let expectedPeer {
+                    Text("Scan the pairing QR displayed on \(expectedPeer.name).")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                        .padding(.bottom, 12)
+                }
 
                 if selectedTab == 0 {
                     qrScannerTab
@@ -242,7 +272,7 @@ public struct QRPairingScannerView: View {
         guard captureState.beginPairing() else { return }
         errorMessage = nil
         cameraFailure = nil
-        appState.pairWithQrPayload(payload) { result in
+        appState.pairWithQrPayload(payload, expectedIdentity: expectedPeer?.fingerprint) { result in
             captureState.finishPairing(succeeded: (try? result.get()) != nil)
             switch result {
             case .success(let peer):
@@ -305,8 +335,7 @@ final class CameraViewController: UIViewController, AVCaptureMetadataOutputObjec
     private var didDeliverCode = false
     private var lastCameraError: NearsideErrorCode?
     private var cameraObservers: [NSObjectProtocol] = []
-    private var cameraInterrupted = false
-    private var runtimeFailed = false
+    private var cameraAvailability = QRCameraAvailabilityState()
 
     deinit {
         cameraObservers.forEach(NotificationCenter.default.removeObserver)
@@ -361,7 +390,7 @@ final class CameraViewController: UIViewController, AVCaptureMetadataOutputObjec
         case .denied, .restricted:
             reportCameraError(.pairingCameraPermissionDenied, "Camera permission is denied. Allow camera access in Settings or paste a pairing QR.")
         case .authorized:
-            guard !cameraInterrupted && !runtimeFailed else { return }
+            guard cameraAvailability.canConfigureOrStart else { return }
             let recovered = lastCameraError != nil
             lastCameraError = nil
             if recovered {
@@ -380,6 +409,7 @@ final class CameraViewController: UIViewController, AVCaptureMetadataOutputObjec
     private func configureCamera() {
         guard !isConfiguring else { return }
         guard let device = AVCaptureDevice.default(for: .video) else {
+            cameraAvailability.fail()
             reportCameraError(.pairingCameraUnavailable, "No camera is available. Paste a pairing QR to continue.")
             return
         }
@@ -428,6 +458,7 @@ final class CameraViewController: UIViewController, AVCaptureMetadataOutputObjec
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.isConfiguring = false
+                    self.cameraAvailability.fail()
                     self.reportCameraError(.pairingCameraUnavailable, "The camera could not start. Paste a pairing QR to continue.", underlyingError: error)
                 }
             }
@@ -444,16 +475,16 @@ final class CameraViewController: UIViewController, AVCaptureMetadataOutputObjec
         let notifications = NotificationCenter.default
         cameraObservers.append(notifications.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: .main) { [weak self] notification in
             let cause = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
-            self?.runtimeFailed = true
+            self?.cameraAvailability.fail()
             self?.setScanning(false)
             self?.reportCameraError(.pairingCameraUnavailable, "The camera stopped unexpectedly. Paste a pairing QR to continue.", underlyingError: cause)
         })
         cameraObservers.append(notifications.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: .main) { [weak self] _ in
-            self?.cameraInterrupted = true
+            self?.cameraAvailability.interrupt()
             self?.reportCameraError(.pairingCameraUnavailable, "The camera is temporarily unavailable. Close other camera apps or paste a pairing QR.")
         })
         cameraObservers.append(notifications.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: session, queue: .main) { [weak self] _ in
-            self?.cameraInterrupted = false
+            self?.cameraAvailability.resumeAfterInterruption()
             self?.updateCamera()
         })
     }

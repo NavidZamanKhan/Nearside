@@ -1,15 +1,13 @@
 import SwiftUI
 import AppKit
-import CryptoKit
-import CoreImage
 
 @MainActor
 public struct PreferencesView: View {
     @ObservedObject var appState: AppState
     @State private var selectedTab: Int = 0
     @State private var showingPairSheet: Bool = false
-    @State private var shortCodeInput: String = ""
-    @State private var pairMode: Int = 0 // 0 = QR, 1 = Short Code
+    @State private var pairingTarget: NearsideDevice?
+    @State private var unpairCandidate: NearsideDevice?
 
     public init(appState: AppState) {
         self.appState = appState
@@ -38,7 +36,19 @@ public struct PreferencesView: View {
         .padding(20)
         .frame(width: 520, height: 420)
         .sheet(isPresented: $showingPairSheet) {
-            pairingSheet
+            MacPairingView(appState: appState, target: pairingTarget)
+        }
+        .confirmationDialog("Unpair \(unpairCandidate?.name ?? "device")?", isPresented: Binding(
+            get: { unpairCandidate != nil },
+            set: { if !$0 { unpairCandidate = nil } }
+        ), titleVisibility: .visible, presenting: unpairCandidate) { device in
+            Button("Unpair", role: .destructive) {
+                appState.unpairDevice(id: device.fingerprint)
+                unpairCandidate = nil
+            }
+            Button("Cancel", role: .cancel) { unpairCandidate = nil }
+        } message: { device in
+            Text("Remove trust for identity \(device.shortFingerprint)? Pair this device again before sending or receiving content.")
         }
     }
 
@@ -62,7 +72,12 @@ public struct PreferencesView: View {
                 .padding(.vertical, 8)
 
             Section(header: Text("Receiving").font(.headline)) {
-                Toggle("Accept inbound transfers", isOn: $appState.isReceivingActive)
+                Toggle("Accept inbound transfers", isOn: Binding(
+                    get: { appState.isReceivingActive },
+                    set: { value in
+                        if value != appState.isReceivingActive { appState.toggleReceiving() }
+                    }
+                ))
 
                 Toggle("Automatically accept files from paired devices", isOn: $appState.autoAcceptFromPaired)
 
@@ -91,10 +106,18 @@ public struct PreferencesView: View {
                     .font(.headline)
                 Spacer()
                 Button(action: {
+                    pairingTarget = nil
                     showingPairSheet = true
                 }) {
                     Label("Pair New Device", systemImage: "plus")
                 }
+            }
+
+            if let message = appState.clipboardToastMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if appState.pairedDevices.isEmpty && appState.discoveredDevices.isEmpty {
@@ -113,9 +136,7 @@ public struct PreferencesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    let unpariedDiscovered = appState.discoveredDevices.filter { disc in
-                        !appState.pairedDevices.contains(where: { $0.id == disc.id })
-                    }
+                    let unpariedDiscovered = appState.availableNearbyDevices
                     if !unpariedDiscovered.isEmpty {
                         Section(header: Text("Discovered Nearby").font(.caption).foregroundColor(.secondary)) {
                             ForEach(unpariedDiscovered) { device in
@@ -136,7 +157,8 @@ public struct PreferencesView: View {
                                     Spacer()
 
                                     Button("Pair") {
-                                        appState.pairDiscoveredDevice(device)
+                                        pairingTarget = device
+                                        showingPairSheet = true
                                     }
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
@@ -166,7 +188,7 @@ public struct PreferencesView: View {
                                     Spacer()
 
                                     Button(action: {
-                                        appState.unpairDevice(id: device.id)
+                                        unpairCandidate = device
                                     }) {
                                         Text("Unpair")
                                             .font(.caption)
@@ -210,127 +232,6 @@ public struct PreferencesView: View {
                     }
                 }
             }
-        }
-    }
-
-    @State private var qrPayload: QRPairingPayload?
-    @State private var localPakeCode: String = ""
-
-    private var currentQRUri: String {
-        return qrPayload?.toURI() ?? "nearside://pair?v=1"
-    }
-
-    private func generateQRCode(from string: String) -> NSImage? {
-        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
-        filter.setValue(Data(string.utf8), forKey: "inputMessage")
-        guard let output = filter.outputImage else { return nil }
-        let scaled = output.transformed(by: CGAffineTransform(scaleX: 6, y: 6))
-        let rep = NSCIImageRep(ciImage: scaled)
-        let img = NSImage(size: rep.size)
-        img.addRepresentation(rep)
-        return img
-    }
-
-    // MARK: - Pairing Sheet
-    private var pairingSheet: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Text("Pair New Device")
-                    .font(.headline)
-                Spacer()
-                Button("Done") {
-                    showingPairSheet = false
-                }
-            }
-
-            Picker("Pairing Mode", selection: $pairMode) {
-                Text("QR Code").tag(0)
-                Text("Short Code").tag(1)
-            }
-            .pickerStyle(.segmented)
-
-            if pairMode == 0 {
-                VStack(spacing: 10) {
-                    Text("Scan this QR code with Nearside on your Android device:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-
-                    if let qrImage = generateQRCode(from: currentQRUri) {
-                        Image(nsImage: qrImage)
-                            .interpolation(.none)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 150, height: 150)
-                            .padding(6)
-                            .background(Color.white)
-                            .cornerRadius(8)
-                    }
-
-                    Text("Session ID: \(qrPayload?.sessionId.prefix(8) ?? "")")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 4)
-            } else {
-                VStack(spacing: 14) {
-                    Text("Your Pairing Short Code:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Text(localPakeCode)
-                        .font(.system(size: 28, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(8)
-
-                    Text("Or enter code from peer:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    TextField("12345678", text: $shortCodeInput)
-                        .font(.system(size: 20, weight: .bold, design: .monospaced))
-                        .multilineTextAlignment(.center)
-                        .frame(width: 180)
-                        .textFieldStyle(.roundedBorder)
-
-                    Button("Confirm Pairing") {
-                        let input = shortCodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if let uriPayload = QRPairingPayload.fromURI(input) {
-                            appState.pairWithQrPayload(uriPayload)
-                            showingPairSheet = false
-                            shortCodeInput = ""
-                        } else if input.contains(".") {
-                            let parts = input.split(separator: ":")
-                            let host = String(parts[0])
-                            let port = parts.count > 1 ? (UInt16(parts[1]) ?? 41433) : 41433
-                            appState.pairWithPeerAddress(host: host, port: port, confirmationCode: "")
-                            showingPairSheet = false
-                            shortCodeInput = ""
-                        } else if let disc = appState.discoveredDevices.first(where: { d in !appState.pairedDevices.contains(where: { p in p.id == d.id }) }) ?? appState.discoveredDevices.first {
-                            appState.pairDiscoveredDevice(disc)
-                            showingPairSheet = false
-                            shortCodeInput = ""
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .padding(.vertical, 10)
-            }
-
-            Spacer()
-        }
-        .padding(20)
-        .frame(width: 380, height: 350)
-        .onAppear {
-            let payload = QRPairingPayload(hostIdentity: appState.localFingerprint, hostName: appState.localDeviceName)
-            QRPairingSessions.shared.register(payload)
-            self.qrPayload = payload
-            self.localPakeCode = String(format: "%04d %04d", Int.random(in: 1000...9999), Int.random(in: 1000...9999))
-        }
-        .onDisappear {
-            if let payload = qrPayload { QRPairingSessions.shared.unregister(payload.sessionId) }
         }
     }
 

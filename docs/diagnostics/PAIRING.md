@@ -53,6 +53,40 @@ Camera failures use `scanQR` / `startScanner`, a scanner correlation ID, and the
 camera codes above. Invalid or expired scans use existing payload/session codes.
 Camera images, URI contents, shared secrets and proofs never enter diagnostic logs.
 
+## Pairing a selected nearby identity
+
+Nearby Pair opens the existing mobile scanner with the selected fingerprint retained
+through URI paste and retry. A different fingerprint is rejected before a connection
+or enrollment, even when its display name matches. Hosted macOS QR sessions similarly
+restrict the initiating client to the selected identity when opened from a nearby row.
+General Scan and Show QR remain available without a selected peer.
+
+Successful pairing requires the existing mutual QR proof and a durable pin write.
+`NS-PAIR-002` also classifies selected identity mismatch; `NS-TRUST-004` reports a failed
+pin write, which cannot produce a successful UI result. Incoming pairing refreshes
+trusted rows without creating a file-transfer history entry or inventing live presence.
+Blocked peers and changed keys retain `NS-TRUST-002` / `NS-TRUST-003`; connection
+failures retain their connection classification. Each QR failure carries its session
+ID. A hosted QR displays failures only from its own session and offers regeneration.
+Regeneration and dismissal are scoped to the displayed session. A delayed completion
+cannot clear a newer QR, and pairing-only outcomes cannot fail an unrelated transfer.
+No pairing wire format, HMAC, ECDH, signature, or encryption primitive changed.
+
+The legacy empty-code convenience network path has been removed from the Apple app
+state. Unverified addresses and the existing short-code primitives cannot enroll peers.
+Paste the complete current Nearside QR URI for supported manual network pairing.
+
+`bash scripts/verify_secure_transfer.sh` now starts with empty temporary trust stores,
+checks selected-client rejection, completes the real QR exchange in both language
+directions, reloads the exact SPKI pins, and transfers encrypted files in both directions.
+
 The previously unauthenticated direct-IP/empty-code and short-code network enrollment paths now fail closed with instructions to scan or paste a current QR. Short-code cryptographic utilities remain present, but no verified network PAKE exchange was implemented in the existing application. A plain IP or short code must never establish trust through that old shortcut.
 
-Manual device verification: on the updated Mac, open Preferences → Pair New Device and display its QR; on Android choose Scan QR, grant permission, capture, and verify. Confirm both trust lists update only after verification. Deny camera access, retry from app settings, background/foreground the scan view, switch tabs, scan a non-Nearside QR, scan an expired/dismissed code, and attempt to reuse a successfully consumed code. Repeat with Android displaying its QR and the Mac pasting the current full pairing URI.
+Manual device verification: open Pair Device / Show QR on the updated Mac's shelf;
+on Android or iOS tap the main Scan QR action, grant permission, and capture the code.
+Verification starts automatically and both trust lists update only after the exchange.
+Deny camera access, retry from app settings, background/foreground and rotate the
+scanner, cancel with a QR visible, scan a non-Nearside QR, scan an expired/dismissed
+code, and attempt to reuse a successfully consumed code. Use a nearby Pair action
+and verify that another device's QR is rejected, including a peer with the same name.
+Repeat with Android displaying its QR and the Mac pasting the current full pairing URI.

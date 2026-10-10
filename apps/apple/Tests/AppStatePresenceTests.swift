@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import AppKit
 import SwiftUI
+import Network
 
 @main
 struct AppStatePresenceTests {
@@ -63,6 +64,59 @@ struct AppStatePresenceTests {
         check(!reloaded.isEnrolled(identity: oldPhone.publicIdentity) && reloaded.isEnrolled(identity: phone.publicIdentity),
             "Only the selected trust relationship is removed after restart")
         check(reloaded.isBlocked(identity: phone.publicIdentity), "Unpair preserves another peer's blocked state")
+
+        let session = state.startPairingSession(expectedPeerIdentity: stranger.publicIdentity)!
+        defer { state.stopPairingSession() }
+        let blocked = TransferEngine.pairingFailure(TrustError.peerBlocked(identity: phone.publicIdentity), sessionId: session.sessionId)
+        check(blocked.code == .trustPeerBlocked && blocked.correlationId == session.sessionId,
+            "A blocked QR peer retains the trust error code and pairing session")
+        let mismatch = TransferEngine.pairingFailure(TrustError.keyMismatch(identity: phone.publicIdentity), sessionId: session.sessionId)
+        check(mismatch.code == .trustKeyMismatch, "A changed QR peer key retains its trust classification")
+        let storage = TransferEngine.pairingFailure(NearsideError(code: .trustStorageFailed,
+            operation: "saveTrustStore", message: "Trust storage is unavailable"), sessionId: session.sessionId)
+        check(storage.code == .trustStorageFailed && storage.correlationId == session.sessionId && storage.operation == "saveTrustStore",
+            "A failed QR pin write gains the pairing session without losing its storage classification")
+        let refused = TransferEngine.pairingFailure(NWError.posix(.ECONNREFUSED), sessionId: session.sessionId)
+        check(refused.code == .connectionRefused, "A refused QR connection retains its connection classification")
+        let native = NSError(domain: "TestPairingFailure", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "private-pairing-secret \(root.path)"])
+        let sanitized = TransferEngine.pairingFailure(native, sessionId: session.sessionId)
+        check(!sanitized.description.contains("private-pairing-secret") && !sanitized.description.contains(root.path),
+            "Unexpected pairing failures omit sensitive native descriptions and paths")
+        state.recordPairingFailure(NearsideError(code: .pairingVerificationFailed, operation: "verifyQR",
+            message: "Unrelated session", correlationId: UUID().uuidString))
+        check(state.pairingStatusMessage == nil, "An unrelated connection cannot change the displayed QR session")
+        let outgoing = TransferRecord(id: "outgoing-file", deviceName: "Phone", devicePlatform: .android,
+            direction: .outgoing, filename: "file.txt", fileCount: 1, totalSizeBytes: 10,
+            progress: 0.5, status: .transferring, timestamp: Date())
+        state.activeTransfer = outgoing
+        state.recordInboundFailure(storage, transferId: nil)
+        check(state.pairingStatusMessage?.contains("NS-TRUST-004") == true && state.activePairingPayload?.sessionId == session.sessionId,
+            "The displayed QR session reports its own failed enrollment and offers regeneration")
+        check(state.activeTransfer?.id == outgoing.id && state.transferHistory.isEmpty,
+            "An incoming QR failure cannot mark an unrelated outgoing file failed")
+        state.recordInboundFailure(NearsideError(code: .transferInterrupted, operation: "receiveFile",
+            message: "Another connection failed"), transferId: "different-incoming-file")
+        check(state.activeTransfer?.id == outgoing.id && state.transferHistory.isEmpty,
+            "A failed incoming connection cannot clear another transfer's progress")
+        state.recordInboundFailure(NearsideError(code: .transferInterrupted, operation: "receiveFile",
+            message: "Current connection failed"), transferId: outgoing.id)
+        check(state.activeTransfer == nil && state.transferHistory.first?.id == outgoing.id,
+            "The current connection's failure still records its own failed transfer")
+        state.transferHistory.removeAll()
+        let replacement = state.startPairingSession()!
+        state.stopPairingSession(expectedSessionId: session.sessionId)
+        let stillActive = try QRPairingSessions.shared.requireActive(replacement.sessionId)
+        check(state.activePairingPayload?.sessionId == replacement.sessionId && stillActive.sessionId == replacement.sessionId,
+            "Dismissing an older pairing window cannot unregister another window's new QR")
+        state.recordPairingSuccess(sessionId: session.sessionId, peerName: "Older session peer")
+        check(state.activePairingPayload?.sessionId == replacement.sessionId && state.pairingStatusMessage == nil,
+            "An older completed exchange cannot hide a newly generated QR session")
+        state.recordPairingSuccess(sessionId: replacement.sessionId, peerName: "Current session peer")
+        check(state.activePairingPayload == nil && state.pairingStatusMessage == "Paired with Current session peer",
+            "Only completion of the displayed session clears its QR and shows success")
+        check(!QRPairingSessions.shared.consume(replacement.sessionId),
+            "Clearing a completed QR cannot leave an enrollment session registered")
         print("AppStatePresenceTests: \(checks) checks passed")
     }
 
