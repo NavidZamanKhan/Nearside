@@ -273,7 +273,12 @@ public final class DiscoveryService: @unchecked Sendable {
             )
 
             updatedDevices[peerId] = device
-            updatedEndpoints[peerId] = result.endpoint
+            if let ipStr = endpointHost, ipStr.contains("."), !ipStr.contains(":"),
+               let port = NWEndpoint.Port(rawValue: endpointPort ?? 41433) {
+                updatedEndpoints[peerId] = .hostPort(host: NWEndpoint.Host(ipStr), port: port)
+            } else {
+                updatedEndpoints[peerId] = result.endpoint
+            }
         }
 
         self.discoveredMap = updatedDevices

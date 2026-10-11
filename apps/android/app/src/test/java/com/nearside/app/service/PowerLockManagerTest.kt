@@ -123,15 +123,17 @@ class PowerLockManagerTest {
 
         assertFalse(manager.isStandbyEnabled)
         assertFalse(mock.wifiLockHeld)
+        assertFalse(mock.wakeLockHeld)
 
         manager.setStandby(true)
         assertTrue(manager.isStandbyEnabled)
         assertTrue(mock.wifiLockHeld)
-        assertFalse(mock.wakeLockHeld)
+        assertTrue(mock.wakeLockHeld)
 
         manager.setStandby(false)
         assertFalse(manager.isStandbyEnabled)
         assertFalse(mock.wifiLockHeld)
+        assertFalse(mock.wakeLockHeld)
     }
 
     @Test
@@ -139,20 +141,20 @@ class PowerLockManagerTest {
         val mock = MockLockDelegate()
         val manager = PowerLockManager(mock)
 
-        // Standby active
+        // Standby active: holds both wifi and wake lock
         manager.setStandby(true)
         assertTrue(mock.wifiLockHeld)
-        assertFalse(mock.wakeLockHeld)
+        assertTrue(mock.wakeLockHeld)
 
-        // Transfer starts: wake lock added, wifi lock stays held
+        // Transfer starts: locks stay held
         manager.acquire("tx_1")
         assertTrue(mock.wifiLockHeld)
         assertTrue(mock.wakeLockHeld)
 
-        // Transfer finishes: wake lock released, wifi lock still held because standby is enabled
+        // Transfer finishes: locks still held because standby is enabled
         manager.release("tx_1")
         assertTrue(mock.wifiLockHeld)
-        assertFalse(mock.wakeLockHeld)
+        assertTrue(mock.wakeLockHeld)
 
         // Release all clears everything
         manager.releaseAll()

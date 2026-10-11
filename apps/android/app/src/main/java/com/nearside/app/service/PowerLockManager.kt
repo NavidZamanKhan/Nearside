@@ -26,7 +26,11 @@ class SystemLockDelegate(private val context: Context) : LockDelegate {
                     setReferenceCounted(false)
                 }
             }
-            wakeLock?.let { if (!it.isHeld) it.acquire(timeoutMs) }
+            wakeLock?.let {
+                if (!it.isHeld) {
+                    if (timeoutMs > 0) it.acquire(timeoutMs) else it.acquire()
+                }
+            }
         } catch (ignored: Exception) {}
     }
 
@@ -89,8 +93,10 @@ class PowerLockManager(private val delegate: LockDelegate) {
             isStandbyWifiEnabled = enabled
             if (enabled) {
                 delegate.acquireWifiLock()
+                delegate.acquireWakeLock(0L)
             } else if (activeTransfers.isEmpty()) {
                 delegate.releaseWifiLock()
+                delegate.releaseWakeLock()
             }
         }
     }
@@ -110,8 +116,8 @@ class PowerLockManager(private val delegate: LockDelegate) {
         synchronized(lock) {
             activeTransfers.remove(tag)
             if (activeTransfers.isEmpty()) {
-                delegate.releaseWakeLock()
                 if (!isStandbyWifiEnabled) {
+                    delegate.releaseWakeLock()
                     delegate.releaseWifiLock()
                 }
             }

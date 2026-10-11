@@ -508,7 +508,10 @@ public final class TransferEngine: @unchecked Sendable {
                                     connection.cancel()
                                     for h in handles { try? h.close() }
                                     if case let .hostPort(host, port) = connection.currentPath?.remoteEndpoint {
-                                        trustStore.updatePeerEndpoint(identity: device.fingerprint, ip: "\(host)", port: port.rawValue)
+                                        let hostStr = "\(host)"
+                                        if !hostStr.lowercased().hasPrefix("fe80:") {
+                                            trustStore.updatePeerEndpoint(identity: device.fingerprint, ip: hostStr, port: port.rawValue)
+                                        }
                                     }
                                     var finalRecord = recordTemplate
                                     finalRecord.progress = 1.0
