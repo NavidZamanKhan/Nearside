@@ -22,6 +22,7 @@ import com.nearside.app.transfer.TransferEngine
 import com.nearside.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -97,6 +98,7 @@ class NearsideReceiverService : Service() {
 
     private lateinit var powerLockManager: PowerLockManager
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var tcpListenerJob: Job? = null
     private var serverSocket: ServerSocket? = null
 
     override fun onCreate() {
@@ -109,6 +111,7 @@ class NearsideReceiverService : Service() {
         when (intent?.action) {
             ACTION_PAUSE -> {
                 isReceiving = false
+                powerLockManager.setStandby(false)
                 powerLockManager.releaseAll()
                 stopTcpListener()
                 updateNotification(isPaused = true)
@@ -116,11 +119,15 @@ class NearsideReceiverService : Service() {
             }
             ACTION_RESUME -> {
                 isReceiving = true
+                powerLockManager.setStandby(true)
                 startTcpListener()
                 updateNotification(isPaused = false)
                 NearsideTileService.requestTileUpdate(this)
             }
             ACTION_REFRESH -> {
+                if (isReceiving) {
+                    powerLockManager.setStandby(true)
+                }
                 updateNotification(isPaused = !isReceiving)
             }
             ACTION_CANCEL_TRANSFER -> {
@@ -132,6 +139,7 @@ class NearsideReceiverService : Service() {
             }
             ACTION_STOP -> {
                 isReceiving = false
+                powerLockManager.setStandby(false)
                 powerLockManager.releaseAll()
                 stopTcpListener()
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -141,6 +149,7 @@ class NearsideReceiverService : Service() {
             }
             else -> {
                 isReceiving = true
+                powerLockManager.setStandby(true)
                 val notification = buildNotification(isPaused = false)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
@@ -159,9 +168,10 @@ class NearsideReceiverService : Service() {
         return START_STICKY
     }
 
+    @Synchronized
     private fun startTcpListener() {
-        serviceScope.launch(Dispatchers.IO) {
-            stopTcpListener()
+        stopTcpListener()
+        tcpListenerJob = serviceScope.launch(Dispatchers.IO) {
             val trustStore = PinnedTrustStore.fromContext(this@NearsideReceiverService)
             val deviceIdentity = com.nearside.app.crypto.DeviceIdentity.loadOrCreateDefault(this@NearsideReceiverService)
 
@@ -262,7 +272,10 @@ class NearsideReceiverService : Service() {
         }
     }
 
+    @Synchronized
     private fun stopTcpListener() {
+        tcpListenerJob?.cancel()
+        tcpListenerJob = null
         try {
             serverSocket?.close()
             NearsideLogger.debug("connection", "stopTcpListener", "Closed TCP ServerSocket")
@@ -274,6 +287,7 @@ class NearsideReceiverService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        powerLockManager.setStandby(false)
         powerLockManager.releaseAll()
         stopTcpListener()
         serviceScope.cancel()

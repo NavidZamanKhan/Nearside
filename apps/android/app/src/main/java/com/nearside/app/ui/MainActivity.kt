@@ -140,6 +140,16 @@ class MainActivity : ComponentActivity() {
 
     private fun requestBatteryExemption() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (powerManager?.isIgnoringBatteryOptimizations(packageName) == true) {
+                try {
+                    val appSettingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(appSettingsIntent)
+                    return
+                } catch (_: Exception) {}
+            }
             try {
                 val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                     data = Uri.parse("package:$packageName")
@@ -403,7 +413,7 @@ fun MainScreen(
                                         fontWeight = FontWeight.SemiBold
                                     )
                                     Text(
-                                        text = "Allow background power consumption so the notification banner stays active when the app is minimized.",
+                                        text = "Allow background power consumption so transfers can be received seamlessly when the screen is locked or the app is minimized. On Vivo and OEM devices, also set 'Background power consumption' to 'Don't restrict' in Battery settings.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )

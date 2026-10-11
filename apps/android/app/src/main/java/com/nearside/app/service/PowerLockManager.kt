@@ -72,12 +72,28 @@ class PowerLockManager(private val delegate: LockDelegate) {
 
     private val lock = Any()
     private val activeTransfers = mutableSetOf<String>()
+    private var isStandbyWifiEnabled = false
 
     val activeCount: Int
         get() = synchronized(lock) { activeTransfers.size }
 
     val isHoldingLocks: Boolean
         get() = synchronized(lock) { delegate.isWakeLockHeld || delegate.isWifiLockHeld }
+
+    val isStandbyEnabled: Boolean
+        get() = synchronized(lock) { isStandbyWifiEnabled }
+
+    fun setStandby(enabled: Boolean) {
+        synchronized(lock) {
+            if (isStandbyWifiEnabled == enabled) return
+            isStandbyWifiEnabled = enabled
+            if (enabled) {
+                delegate.acquireWifiLock()
+            } else if (activeTransfers.isEmpty()) {
+                delegate.releaseWifiLock()
+            }
+        }
+    }
 
     fun acquire(tag: String, timeoutMs: Long = 10 * 60 * 1000L) {
         synchronized(lock) {
@@ -95,7 +111,9 @@ class PowerLockManager(private val delegate: LockDelegate) {
             activeTransfers.remove(tag)
             if (activeTransfers.isEmpty()) {
                 delegate.releaseWakeLock()
-                delegate.releaseWifiLock()
+                if (!isStandbyWifiEnabled) {
+                    delegate.releaseWifiLock()
+                }
             }
         }
     }
@@ -103,8 +121,10 @@ class PowerLockManager(private val delegate: LockDelegate) {
     fun releaseAll() {
         synchronized(lock) {
             activeTransfers.clear()
+            isStandbyWifiEnabled = false
             delegate.releaseWakeLock()
             delegate.releaseWifiLock()
         }
     }
 }
+

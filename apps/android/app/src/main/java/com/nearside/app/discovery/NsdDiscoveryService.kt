@@ -125,6 +125,7 @@ class NsdDiscoveryService(context: Context) {
     private var localIdentity: String = ""
     private var localDeviceName: String = ""
     private var isReceivingActive: Boolean = true
+    private var lastAdvertisedIp: String? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val registry = DiscoveredPeerRegistry()
@@ -188,10 +189,23 @@ class NsdDiscoveryService(context: Context) {
             handler.post { startAdvertising(identity, deviceName, port, isReceiving) }
             return
         }
+        val localIp = getLocalWifiIp()
+        if (registrationListener != null &&
+            lastAdvertisedIp == localIp &&
+            advertisedPort == port &&
+            isReceivingActive == isReceiving &&
+            localDeviceName == deviceName &&
+            localIdentity == identity
+        ) {
+            NearsideLogger.debug("discovery", "startAdvertising", "NSD advertisement already active with matching parameters")
+            return
+        }
+
         this.advertisedPort = port
         this.localIdentity = identity
         this.localDeviceName = deviceName
         this.isReceivingActive = isReceiving
+        this.lastAdvertisedIp = localIp
 
         stopAdvertising()
 
@@ -249,6 +263,7 @@ class NsdDiscoveryService(context: Context) {
             handler.post { stopAdvertising() }
             return
         }
+        lastAdvertisedIp = null
         registrationListener?.let { listener ->
             try {
                 nsdManager.unregisterService(listener)
